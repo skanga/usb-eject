@@ -75,5 +75,6 @@ jobs:
           gh release create $env:GITHUB_REF_NAME `
             '.\release\usb-eject.exe' `
             '.\release\usb-eject.exe.sha256' `
+            --repo $env:GITHUB_REPOSITORY `
             --title "USB Eject CLI $env:GITHUB_REF_NAME" `
             --generate-notes
