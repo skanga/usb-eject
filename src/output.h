@@ -1,0 +1,24 @@
+#ifndef USB_EJECT_OUTPUT_H
+#define USB_EJECT_OUTPUT_H
+
+#include "app.h"
+#include "diagnose.h"
+#include "eject.h"
+#include "inventory.h"
+#include "target.h"
+
+int output_write(int error_stream, const wchar_t *text);
+int output_printf(int error_stream, const wchar_t *format, ...);
+int output_help(void);
+int output_version(void);
+int output_inventory(const DeviceInventory *inventory, OutputFormat format);
+int output_target(const DeviceInventory *inventory, const ResolvedTarget *target);
+int output_app_error(const AppError *error);
+int output_eject_error(const EjectResult *result);
+int output_diagnostic(
+    const DiagnosticReport *report,
+    const EjectResult *eject_result,
+    OutputFormat format,
+    int error_stream);
+
+#endif
