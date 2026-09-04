@@ -1,4 +1,4 @@
-# USB Disk Ejector CLI Design
+# usb-eject Design
 
 Status: Draft 0.1  
 Requirements: [REQUIREMENTS.md](REQUIREMENTS.md), Draft 0.3  
@@ -796,4 +796,3 @@ The following should be settled with prototypes rather than assumptions:
 - [NtQuerySystemInformation](https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntquerysysteminformation)
 - [EnumServicesStatusExW](https://learn.microsoft.com/windows/win32/api/winsvc/nf-winsvc-enumservicesstatusexw)
 - [File management APIs](https://learn.microsoft.com/windows/win32/api/fileapi/)
-

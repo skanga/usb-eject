@@ -47,7 +47,7 @@ jobs:
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: usb-eject-windows-x64
+          name: usb-eject
           path: |
             build/usb-eject.exe
             build/usb-eject.exe.sha256
@@ -64,7 +64,7 @@ jobs:
       - name: Download release artifact
         uses: actions/download-artifact@v4
         with:
-          name: usb-eject-windows-x64
+          name: usb-eject
           path: release
 
       - name: Create GitHub release
@@ -76,5 +76,5 @@ jobs:
             '.\release\usb-eject.exe' `
             '.\release\usb-eject.exe.sha256' `
             --repo $env:GITHUB_REPOSITORY `
-            --title "USB Eject CLI $env:GITHUB_REF_NAME" `
+            --title "usb-eject $env:GITHUB_REF_NAME" `
             --generate-notes

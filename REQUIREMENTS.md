@@ -1,4 +1,4 @@
-# USB Disk Ejector CLI Requirements
+# usb-eject Requirements
 
 Status: Draft 0.3  
 Target: MVP  

@@ -24,6 +24,7 @@ typedef struct {
     DEVINST disk_devinst;
     DEVINST removal_devinst;
     int removable_media;
+    int card_reader;
     int media_present;
 } VolumeInfo;
 
@@ -46,5 +47,10 @@ int inventory_copy_descriptor_string(
     size_t output_capacity);
 
 const wchar_t *inventory_bus_name(DWORD bus_type);
+int inventory_card_reader_hint(
+    int removable_media,
+    const wchar_t *vendor,
+    const wchar_t *product);
+void inventory_sort(DeviceInventory *inventory);
 
 #endif

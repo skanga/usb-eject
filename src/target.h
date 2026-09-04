@@ -12,7 +12,10 @@ typedef struct {
     DEVINST removal_devinst;
     size_t sibling_volume_count;
     size_t distinct_match_count;
+    size_t *distinct_volume_indexes;
 } ResolvedTarget;
+
+void resolved_target_dispose(ResolvedTarget *resolved);
 
 AppStatus target_resolve(
     const DeviceInventory *inventory,

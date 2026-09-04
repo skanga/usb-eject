@@ -7,6 +7,7 @@
 #include <wchar.h>
 
 #include "inventory.h"
+#include "text.h"
 
 const GUID USB_EJECT_GUID_DEVINTERFACE_DISK = {
     0x53f56307, 0xb6bf, 0x11d0,
@@ -27,7 +28,22 @@ static wchar_t *wide_duplicate(const wchar_t *value) {
 
 static void volume_init(VolumeInfo *volume) {
     memset(volume, 0, sizeof(*volume));
+    volume->card_reader = -1;
     volume->media_present = -1;
+}
+
+int inventory_card_reader_hint(
+    int removable_media,
+    const wchar_t *vendor,
+    const wchar_t *product)
+{
+    (void)vendor;
+    if (!removable_media) return 0;
+    if (product != NULL &&
+        (text_match_pattern(product, L"*reader*") ||
+         text_match_pattern(product, L"*card*") ||
+         text_match_pattern(product, L"*MMC*"))) return 1;
+    return -1;
 }
 
 static void volume_dispose(VolumeInfo *volume) {
@@ -274,7 +290,25 @@ static int query_storage(HANDLE handle, VolumeInfo *volume, DWORD *error_code) {
         }
     }
     free(descriptor);
+    volume->card_reader = inventory_card_reader_hint(
+        volume->removable_media, volume->vendor, volume->product);
     return 1;
+}
+
+static void query_media_status(HANDLE handle, VolumeInfo *volume) {
+    DWORD returned;
+    DWORD code;
+    if (volume->card_reader != 1) return;
+    returned = 0;
+    if (DeviceIoControl(handle, IOCTL_STORAGE_CHECK_VERIFY2,
+            NULL, 0, NULL, 0, &returned, NULL)) {
+        volume->media_present = 1;
+        return;
+    }
+    code = GetLastError();
+    if (code == ERROR_NOT_READY || code == ERROR_NO_MEDIA_IN_DRIVE) {
+        volume->media_present = 0;
+    }
 }
 
 static wchar_t *query_native_path(const wchar_t *volume_guid) {
@@ -382,6 +416,7 @@ static AppStatus scan_volume(
         inventory->skipped_transient++;
         return APP_OK;
     }
+    query_media_status(handle, &volume);
     CloseHandle(handle);
 
     if (volume.bus_type != BUS_TYPE_USB && volume.bus_type != BUS_TYPE_1394) {
@@ -427,6 +462,36 @@ static wchar_t *query_instance_id(DEVINST devinst) {
     return value;
 }
 
+static int device_capabilities(DEVINST devinst, DWORD *capabilities) {
+    ULONG type;
+    ULONG size;
+    CONFIGRET result;
+    type = 0;
+    size = sizeof(*capabilities);
+    *capabilities = 0;
+    result = CM_Get_DevNode_Registry_PropertyW(devinst, CM_DRP_CAPABILITIES,
+        &type, (PBYTE)capabilities, &size, 0);
+    return result == CR_SUCCESS && size == sizeof(*capabilities);
+}
+
+static DEVINST select_removal_devinst(DEVINST disk_devinst) {
+    DEVINST current;
+    DEVINST parent;
+    DWORD capabilities;
+    unsigned depth;
+    current = disk_devinst;
+    for (depth = 0; current != 0 && depth < 32; depth++) {
+        if (device_capabilities(current, &capabilities) &&
+            (capabilities & (CM_DEVCAP_REMOVABLE | CM_DEVCAP_EJECTSUPPORTED)) != 0) {
+            return current;
+        }
+        parent = 0;
+        if (CM_Get_Parent(&parent, current, 0) != CR_SUCCESS || parent == current) break;
+        current = parent;
+    }
+    return 0;
+}
+
 static void attach_interface_to_volumes(
     DeviceInventory *inventory,
     DWORD device_type,
@@ -434,20 +499,17 @@ static void attach_interface_to_volumes(
     DEVINST disk_devinst)
 {
     size_t index;
-    DEVINST parent;
-    CONFIGRET result;
+    DEVINST removal;
     wchar_t *instance_id;
 
-    parent = 0;
-    result = CM_Get_Parent(&parent, disk_devinst, 0);
-    if (result != CR_SUCCESS) parent = 0;
-    instance_id = query_instance_id(parent != 0 ? parent : disk_devinst);
+    removal = select_removal_devinst(disk_devinst);
+    instance_id = query_instance_id(removal != 0 ? removal : disk_devinst);
 
     for (index = 0; index < inventory->count; index++) {
         if (inventory->volumes[index].device_type == device_type &&
             inventory->volumes[index].device_number == device_number) {
             inventory->volumes[index].disk_devinst = disk_devinst;
-            inventory->volumes[index].removal_devinst = parent;
+            inventory->volumes[index].removal_devinst = removal;
             if (instance_id != NULL && inventory->volumes[index].instance_id == NULL) {
                 inventory->volumes[index].instance_id = wide_duplicate(instance_id);
             }
@@ -540,8 +602,49 @@ AppStatus inventory_build(DeviceInventory *inventory, AppError *error) {
         }
     }
     FindVolumeClose(find_handle);
-    if (status == APP_OK) map_device_interfaces(inventory);
+    if (status == APP_OK) {
+        map_device_interfaces(inventory);
+        inventory_sort(inventory);
+    }
     return status;
+}
+
+static int volume_compare(const void *left_value, const void *right_value) {
+    const VolumeInfo *left;
+    const VolumeInfo *right;
+    const wchar_t *left_mount;
+    const wchar_t *right_mount;
+    int compared;
+    left = (const VolumeInfo *)left_value;
+    right = (const VolumeInfo *)right_value;
+    left_mount = left->mount_count != 0 ? left->mount_points[0] : L"";
+    right_mount = right->mount_count != 0 ? right->mount_points[0] : L"";
+    compared = _wcsicmp(left_mount, right_mount);
+    if (compared != 0) return compared;
+    return _wcsicmp(left->volume_guid != NULL ? left->volume_guid : L"",
+        right->volume_guid != NULL ? right->volume_guid : L"");
+}
+
+static int mount_compare(const void *left_value, const void *right_value) {
+    const wchar_t *const *left;
+    const wchar_t *const *right;
+    left = (const wchar_t *const *)left_value;
+    right = (const wchar_t *const *)right_value;
+    return _wcsicmp(*left, *right);
+}
+
+void inventory_sort(DeviceInventory *inventory) {
+    size_t index;
+    if (inventory == NULL) return;
+    for (index = 0; index < inventory->count; index++) {
+        if (inventory->volumes[index].mount_count > 1) {
+            qsort(inventory->volumes[index].mount_points,
+                inventory->volumes[index].mount_count,
+                sizeof(wchar_t *), mount_compare);
+        }
+    }
+    if (inventory->count < 2) return;
+    qsort(inventory->volumes, inventory->count, sizeof(VolumeInfo), volume_compare);
 }
 
 const wchar_t *inventory_bus_name(DWORD bus_type) {

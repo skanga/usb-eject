@@ -200,6 +200,12 @@ static int same_device(const VolumeInfo *left, const VolumeInfo *right) {
     return left == right;
 }
 
+void resolved_target_dispose(ResolvedTarget *resolved) {
+    if (resolved == NULL) return;
+    free(resolved->distinct_volume_indexes);
+    memset(resolved, 0, sizeof(*resolved));
+}
+
 AppStatus target_resolve(
     const DeviceInventory *inventory,
     const TargetSelector *selector,
@@ -215,15 +221,24 @@ AppStatus target_resolve(
     size_t previous;
     int match;
     AppStatus status;
+    size_t *distinct_indexes;
 
     memset(resolved, 0, sizeof(*resolved));
     app_error_clear(error);
     if (inventory == NULL || selector == NULL) return APP_INTERNAL_ERROR;
     matched = (unsigned char *)calloc(inventory->count == 0 ? 1 : inventory->count, 1);
-    if (matched == NULL) return APP_OUT_OF_MEMORY;
+    if (matched == NULL) {
+        if (error != NULL) {
+            error->status = APP_OUT_OF_MEMORY;
+            error->win32_error = ERROR_NOT_ENOUGH_MEMORY;
+            error->operation = L"allocate target matches";
+        }
+        return APP_OUT_OF_MEMORY;
+    }
     resolved_mount = NULL;
     self_path = NULL;
     code = ERROR_SUCCESS;
+    distinct_indexes = NULL;
 
     if (selector->kind == SELECTOR_IMPLICIT &&
         parse_drive_letter(selector->value, &letter)) {
@@ -249,6 +264,10 @@ AppStatus target_resolve(
     } else if (selector->kind == SELECTOR_LETTER &&
                !parse_drive_letter(selector->value, &letter)) {
         free(matched);
+        if (error != NULL) {
+            error->status = APP_USAGE;
+            error->operation = L"validate drive letter";
+        }
         return APP_USAGE;
     }
 
@@ -269,6 +288,19 @@ AppStatus target_resolve(
     free(resolved_mount);
     free(self_path);
 
+    if (inventory->count != 0) {
+        distinct_indexes = (size_t *)malloc(inventory->count * sizeof(size_t));
+        if (distinct_indexes == NULL) {
+            free(matched);
+            if (error != NULL) {
+                error->status = APP_OUT_OF_MEMORY;
+                error->win32_error = ERROR_NOT_ENOUGH_MEMORY;
+                error->operation = L"allocate ambiguous target matches";
+            }
+            return APP_OUT_OF_MEMORY;
+        }
+    }
+
     for (index = 0; index < inventory->count; index++) {
         if (!matched[index]) continue;
         for (previous = 0; previous < index; previous++) {
@@ -277,10 +309,12 @@ AppStatus target_resolve(
         }
         if (previous == index) {
             if (resolved->distinct_match_count == 0) resolved->volume_index = index;
+            distinct_indexes[resolved->distinct_match_count] = index;
             resolved->distinct_match_count++;
         }
     }
     free(matched);
+    resolved->distinct_volume_indexes = distinct_indexes;
 
     if (resolved->distinct_match_count == 0) return APP_NOT_FOUND;
     if (resolved->distinct_match_count > 1) return APP_AMBIGUOUS;

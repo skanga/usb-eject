@@ -35,6 +35,7 @@ typedef struct {
 
 typedef struct {
     CommandKind kind;
+    CommandKind help_topic;
     TargetSelector selector;
     OutputFormat format;
     int card_mode;

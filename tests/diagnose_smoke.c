@@ -21,6 +21,9 @@ int main(void) {
     AppError error;
     size_t index;
     int found;
+    int worker_exit;
+
+    if (diagnostic_run_worker_if_requested(&worker_exit)) return worker_exit;
 
     if (GetFullPathNameW(L".\\tests\\test_main.c", 32768, source_path, NULL) == 0) {
         printf("cannot resolve smoke-test file\n");

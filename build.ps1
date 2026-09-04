@@ -25,6 +25,7 @@ $sources = @(
     'diagnose.c',
     'action.c',
     'output.c'
+    'portable.c'
 ) | ForEach-Object { Join-Path $cliRoot "src\$_" }
 
 & $compiler -std -Wall -Werror -peconsole `

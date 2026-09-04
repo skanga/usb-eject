@@ -8,6 +8,27 @@ typedef DEVINST *PDEVINST;
 typedef ULONG CONFIGRET;
 typedef PVOID HDEVINFO;
 
+#ifndef TH32CS_SNAPPROCESS
+#define TH32CS_SNAPPROCESS 0x00000002
+#endif
+
+typedef struct tagPROCESSENTRY32W {
+    DWORD dwSize;
+    DWORD cntUsage;
+    DWORD th32ProcessID;
+    ULONG_PTR th32DefaultHeapID;
+    DWORD th32ModuleID;
+    DWORD cntThreads;
+    DWORD th32ParentProcessID;
+    LONG pcPriClassBase;
+    DWORD dwFlags;
+    WCHAR szExeFile[MAX_PATH];
+} PROCESSENTRY32W, *PPROCESSENTRY32W;
+
+__declspec(dllimport) HANDLE WINAPI CreateToolhelp32Snapshot(DWORD, DWORD);
+__declspec(dllimport) BOOL WINAPI Process32FirstW(HANDLE, PPROCESSENTRY32W);
+__declspec(dllimport) BOOL WINAPI Process32NextW(HANDLE, PPROCESSENTRY32W);
+
 typedef enum _PNP_VETO_TYPE {
     PNP_VetoTypeUnknown = 0,
     PNP_VetoLegacyDevice,
@@ -79,6 +100,9 @@ typedef struct _STORAGE_DEVICE_DESCRIPTOR {
 
 #define CR_SUCCESS 0
 #define CR_NO_SUCH_DEVNODE 0x0000000d
+#define CM_DRP_CAPABILITIES 0x0000000f
+#define CM_DEVCAP_EJECTSUPPORTED 0x00000002
+#define CM_DEVCAP_REMOVABLE 0x00000004
 
 #define DIGCF_PRESENT 0x00000002
 #define DIGCF_DEVICEINTERFACE 0x00000010
@@ -108,6 +132,8 @@ __declspec(dllimport) BOOL WINAPI SetupDiDestroyDeviceInfoList(HDEVINFO);
 
 __declspec(dllimport) CONFIGRET WINAPI CM_Get_Parent(
     PDEVINST, DEVINST, ULONG);
+__declspec(dllimport) CONFIGRET WINAPI CM_Get_DevNode_Registry_PropertyW(
+    DEVINST, ULONG, PULONG, PBYTE, PULONG, ULONG);
 __declspec(dllimport) CONFIGRET WINAPI CM_Get_Device_ID_Size(
     PULONG, DEVINST, ULONG);
 __declspec(dllimport) CONFIGRET WINAPI CM_Get_Device_IDW(
