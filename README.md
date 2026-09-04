@@ -15,6 +15,11 @@ From this directory:
 
 The executable is written to `build\usb-eject.exe`.
 
+GitHub Actions builds and tests every push and pull request. Successful builds
+include a downloadable `usb-eject-windows-x64` artifact. Pushing a version tag
+such as `v0.1.0` also creates a GitHub release containing `usb-eject.exe` and
+its SHA-256 checksum file.
+
 ## Test
 
 ```powershell

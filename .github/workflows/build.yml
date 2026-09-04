@@ -1,0 +1,79 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install mincc v0048
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/pducklin/minimalisti-C/releases/download/v0048/petcc64-winbin.zip'
+          $archive = Join-Path $env:RUNNER_TEMP 'petcc64-winbin.zip'
+          $mincc = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'mincc'
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash
+          $expectedHash = '6353DC08B93BC2BE1174A07D5A4420478152FC4B8D69E9F2A992CC92C21D9C3C'
+          if ($actualHash -ne $expectedHash) {
+            throw "Unexpected mincc archive checksum: $actualHash"
+          }
+          New-Item -ItemType Directory -Path $mincc -Force | Out-Null
+          Expand-Archive -LiteralPath $archive -DestinationPath $mincc -Force
+
+      - name: Run tests
+        shell: pwsh
+        run: .\tests\run.ps1
+
+      - name: Build release binary
+        shell: pwsh
+        run: |
+          .\build.ps1
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath '.\build\usb-eject.exe').Hash.ToLowerInvariant()
+          "$hash *usb-eject.exe" | Set-Content -Encoding ascii '.\build\usb-eject.exe.sha256'
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: usb-eject-windows-x64
+          path: |
+            build/usb-eject.exe
+            build/usb-eject.exe.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: usb-eject-windows-x64
+          path: release
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME `
+            '.\release\usb-eject.exe' `
+            '.\release\usb-eject.exe.sha256' `
+            --title "USB Eject CLI $env:GITHUB_REF_NAME" `
+            --generate-notes
