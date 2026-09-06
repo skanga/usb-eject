@@ -2,8 +2,7 @@
 
 This repository contains a native command-line implementation inspired by
 [USB Disk Ejector](https://github.com/bgbennyboy/USB-Disk-Ejector). It targets
-64-bit Windows 10 and Windows 11 and builds with the `petcc64` compiler in the
-adjacent `mincc` directory.
+64-bit Windows 10 and Windows 11 and builds with the `petcc64` compiler.
 
 ## Install
 
@@ -108,23 +107,34 @@ coverage, although protected processes and kernel drivers may remain opaque.
 
 Download the pinned
 [minimalisti-C v0048 compiler](https://github.com/pducklin/minimalisti-C/releases/tag/v0048)
-and extract `petcc64.exe` to an adjacent `mincc` directory. From this directory:
+and extract it to any directory. In Command Prompt, configure its location:
 
-```powershell
-.\build.ps1
+```bat
+set "MINCC_HOME=C:\Tools\mincc"
+.\build.bat
 ```
 
-The executable is written to `build\usb-eject.exe`.
+Both batch scripts first use `%MINCC_HOME%\petcc64.exe`, then look for
+`petcc64.exe` on `PATH` when `MINCC_HOME` is unset. An invalid `MINCC_HOME`
+reports an error instead of silently selecting a different compiler. For
+compatibility, `..\mincc` and `..\..\mincc` relative to the project are final
+fallbacks. Paths containing spaces are supported. From PowerShell, use
+`$env:MINCC_HOME = 'C:\Tools\mincc'` to set the variable.
+
+The scripts work from any working directory; invoke them by their full path
+when outside the project. The executable is written to `build\usb-eject.exe`
+inside the project. No PowerShell or Git installation is needed to build or
+run the tests.
 
 GitHub Actions builds and tests every push and pull request. Successful builds
 include a downloadable `usb-eject` artifact. Pushing a version tag
-such as `v0.2.1` also creates a GitHub release containing `usb-eject.exe` and
+such as `v0.2.2` also creates a GitHub release containing `usb-eject.exe` and
 its SHA-256 checksum file.
 
 ## Test
 
-```powershell
-.\tests\run.ps1
+```bat
+.\tests\run.bat
 ```
 
 Unit tests do not eject hardware. The `list` command is read-only. Do not run

@@ -81,7 +81,7 @@ int output_printf(int error_stream, const wchar_t *format, ...) {
 
 int output_help(void) {
     return output_write(0,
-        L"usb-eject 0.2.1\r\n"
+        L"usb-eject 0.2.2\r\n"
         L"\r\n"
         L"Usage:\r\n"
         L"  usb-eject.exe help | --help | -h | /?\r\n"
@@ -185,7 +185,7 @@ int output_command_help(CommandKind command) {
 }
 
 int output_version(void) {
-    return output_write(0, L"usb-eject 0.2.1\r\n");
+    return output_write(0, L"usb-eject 0.2.2\r\n");
 }
 
 static const wchar_t *safe(const wchar_t *value) {

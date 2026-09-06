@@ -18,7 +18,7 @@ Portable decision: retain the necessary asynchronous --this handoff, use exit 11
 
 Validation: parser and card regression failures reproduced before their fixes;
 unit, CLI, simulated recovery, card-I/O, portable launch/receipt, inventory fault,
-deadline and read-only handle-discovery tests pass through tests/run.ps1. The
-release executable builds through build.ps1. Hardware ejection, reader firmware,
+deadline and read-only handle-discovery tests pass through tests/run.bat. The
+release executable builds through build.bat. Hardware ejection, reader firmware,
 and destructive process actions were not exercised. The traversal deadline cannot
 preempt individual Windows enumeration/metadata calls; this limit is documented.

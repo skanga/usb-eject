@@ -23,7 +23,7 @@ jobs:
         run: |
           $url = 'https://github.com/pducklin/minimalisti-C/releases/download/v0048/petcc64-winbin.zip'
           $archive = Join-Path $env:RUNNER_TEMP 'petcc64-winbin.zip'
-          $mincc = Join-Path (Split-Path -Parent $env:GITHUB_WORKSPACE) 'mincc'
+          $mincc = Join-Path $env:RUNNER_TEMP 'mincc'
           Invoke-WebRequest -Uri $url -OutFile $archive
           $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash
           $expectedHash = '6353DC08B93BC2BE1174A07D5A4420478152FC4B8D69E9F2A992CC92C21D9C3C'
@@ -32,15 +32,17 @@ jobs:
           }
           New-Item -ItemType Directory -Path $mincc -Force | Out-Null
           Expand-Archive -LiteralPath $archive -DestinationPath $mincc -Force
+          "MINCC_HOME=$mincc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Run tests
-        shell: pwsh
-        run: .\tests\run.ps1
+        shell: cmd
+        run: tests\run.bat
 
       - name: Build release binary
         shell: pwsh
         run: |
-          .\build.ps1
+          & .\build.bat
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath '.\build\usb-eject.exe').Hash.ToLowerInvariant()
           "$hash *usb-eject.exe" | Set-Content -Encoding ascii '.\build\usb-eject.exe.sha256'
 

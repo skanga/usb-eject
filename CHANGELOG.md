@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.2
+
+- Replace PowerShell build and test scripts with `build.bat` and `tests/run.bat`.
+- Discover mincc through `MINCC_HOME`, then `PATH`, with legacy adjacent
+  directories retained as fallbacks. Invalid explicit configuration fails clearly.
+- Preserve CLI output checks and process timeouts in a native test runner.
+- Update CI to install mincc outside the checkout and configure `MINCC_HOME`.
+
 ## 0.2.1
 
 - Fix portable test setup on clean checkouts so release CI can complete.

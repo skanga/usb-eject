@@ -14,7 +14,7 @@ The CLI is intended for interactive use, shortcuts, batch files, PowerShell, and
 
 The first release shall:
 
-1. Build as a single 64-bit Windows executable with `..\mincc\petcc64.exe`.
+1. Build as a single 64-bit Windows executable using mincc located through `MINCC_HOME`, `PATH`, or legacy adjacent directories.
 2. Require no installation, service, driver, or non-system runtime DLL; normal enumeration and ejection shall work without mandatory elevation.
 3. Enumerate USB and IEEE 1394 storage volumes that Windows considers present.
 4. Show each volume's mount point, label, device name when available, bus type, and card-media status when known.
@@ -401,10 +401,9 @@ text diagnostics group findings by PID with counts and up to three resources;
 
 A representative build command is:
 
-```powershell
-..\mincc\petcc64.exe -std -peconsole -Wall -Werror `
-  -o build\usb-eject.exe src\usb_eject.c `
-  -lkernel32 -lsetupapi -lcfgmgr32 -ladvapi32 -lntdll
+```bat
+set "MINCC_HOME=C:\Tools\mincc"
+build.bat
 ```
 
 The final flags may change as mincc compatibility is validated.

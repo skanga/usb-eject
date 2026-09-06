@@ -107,7 +107,7 @@ cli/
   REQUIREMENTS.md
   DESIGN.md
   README.md                 build and usage instructions
-  build.ps1                 reproducible mincc build
+  build.bat                 reproducible mincc build
   src/
     main.c                  entry point and top-level cleanup
     app.h                   shared domain types and result codes
@@ -708,7 +708,7 @@ Although release builds use mincc, the same sources should periodically compile 
 
 ## 18. Build design
 
-`build.ps1` resolves paths relative to its own location, creates `build` beneath `cli`, and invokes `..\..\mincc\petcc64.exe`. It never relies on the caller's current directory or global compiler installation.
+`build.bat` resolves project paths relative to its own location and creates `build` beneath the project root. Both batch entry points use `find-mincc.bat`: an explicit `MINCC_HOME` takes precedence, followed by `petcc64.exe` on `PATH`, then the legacy adjacent locations. Invalid explicit configuration fails with an actionable error. The native test runner captures both output streams and enforces a 60-second process timeout.
 
 The initial expected libraries are:
 
