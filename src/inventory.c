@@ -84,6 +84,12 @@ static void set_error(AppError *error, AppStatus status, DWORD code, const wchar
     }
 }
 
+static void discovery_issue(DeviceInventory *inventory, DWORD code, const wchar_t *operation) {
+    inventory->skipped_transient++;
+    inventory->last_error = code;
+    inventory->last_operation = operation;
+}
+
 int inventory_copy_descriptor_string(
     const unsigned char *descriptor,
     size_t descriptor_size,
@@ -402,7 +408,9 @@ static AppStatus scan_volume(
         NULL, OPEN_EXISTING, 0, NULL);
     free(open_path);
     if (handle == INVALID_HANDLE_VALUE) {
-        inventory->skipped_transient++;
+        code = GetLastError();
+        if (code != ERROR_NOT_READY && code != ERROR_NO_MEDIA_IN_DRIVE)
+            discovery_issue(inventory, code, L"open volume for discovery");
         volume_dispose(&volume);
         return APP_OK;
     }
@@ -413,7 +421,8 @@ static AppStatus scan_volume(
             set_error(error, APP_OUT_OF_MEMORY, code, L"query storage descriptor");
             return APP_OUT_OF_MEMORY;
         }
-        inventory->skipped_transient++;
+        if (code != ERROR_NOT_READY && code != ERROR_NO_MEDIA_IN_DRIVE)
+            discovery_issue(inventory, code, L"query volume storage properties");
         return APP_OK;
     }
     query_media_status(handle, &volume);
@@ -423,13 +432,14 @@ static AppStatus scan_volume(
         volume_dispose(&volume);
         return APP_OK;
     }
-    if (!query_mounts(volume_guid, &volume, &code) || volume.mount_count == 0) {
+    if (!query_mounts(volume_guid, &volume, &code)) {
         volume_dispose(&volume);
         if (code == ERROR_NOT_ENOUGH_MEMORY) {
             set_error(error, APP_OUT_OF_MEMORY, code, L"query volume mount points");
             return APP_OUT_OF_MEMORY;
         }
-        inventory->skipped_transient++;
+        if (code != ERROR_SUCCESS)
+            discovery_issue(inventory, code, L"query volume mount points");
         return APP_OK;
     }
     if (!query_label(volume_guid, &volume)) {
@@ -438,6 +448,8 @@ static AppStatus scan_volume(
         return APP_OUT_OF_MEMORY;
     }
     volume.native_path = query_native_path(volume_guid);
+    if (volume.native_path == NULL)
+        discovery_issue(inventory, GetLastError(), L"resolve native volume path");
     if (!append_volume(inventory, &volume)) {
         volume_dispose(&volume);
         set_error(error, APP_OUT_OF_MEMORY, ERROR_NOT_ENOUGH_MEMORY, L"append volume");
@@ -504,6 +516,8 @@ static void attach_interface_to_volumes(
 
     removal = select_removal_devinst(disk_devinst);
     instance_id = query_instance_id(removal != 0 ? removal : disk_devinst);
+    if (instance_id == NULL)
+        discovery_issue(inventory, ERROR_INVALID_DATA, L"read device identity");
 
     for (index = 0; index < inventory->count; index++) {
         if (inventory->volumes[index].device_type == device_type &&
@@ -531,7 +545,10 @@ static void map_device_interfaces(DeviceInventory *inventory) {
 
     set = SetupDiGetClassDevsW(&USB_EJECT_GUID_DEVINTERFACE_DISK,
         NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (set == INVALID_HANDLE_VALUE) return;
+    if (set == INVALID_HANDLE_VALUE) {
+        discovery_issue(inventory, GetLastError(), L"enumerate storage interfaces");
+        return;
+    }
 
     for (index = 0; ; index++) {
         memset(&interface_data, 0, sizeof(interface_data));
@@ -539,19 +556,27 @@ static void map_device_interfaces(DeviceInventory *inventory) {
         if (!SetupDiEnumDeviceInterfaces(set, NULL,
                 &USB_EJECT_GUID_DEVINTERFACE_DISK, index, &interface_data)) {
             if (GetLastError() == ERROR_NO_MORE_ITEMS) break;
-            continue;
+            discovery_issue(inventory, GetLastError(), L"enumerate storage interface");
+            break;
         }
         needed = 0;
         SetupDiGetDeviceInterfaceDetailW(set, &interface_data, NULL, 0, &needed, NULL);
         if (needed < sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) ||
-            needed > 1024U * 1024U) continue;
+            needed > 1024U * 1024U) {
+            discovery_issue(inventory, GetLastError(), L"size storage interface path");
+            continue;
+        }
         detail = (PSP_DEVICE_INTERFACE_DETAIL_DATA_W)calloc(1, needed);
-        if (detail == NULL) break;
+        if (detail == NULL) {
+            discovery_issue(inventory, ERROR_NOT_ENOUGH_MEMORY, L"allocate storage interface path");
+            break;
+        }
         detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
         memset(&device_data, 0, sizeof(device_data));
         device_data.cbSize = sizeof(device_data);
         if (!SetupDiGetDeviceInterfaceDetailW(set, &interface_data,
                 detail, needed, &needed, &device_data)) {
+            discovery_issue(inventory, GetLastError(), L"read storage interface path");
             free(detail);
             continue;
         }
@@ -565,8 +590,12 @@ static void map_device_interfaces(DeviceInventory *inventory) {
                 returned >= sizeof(number)) {
                 attach_interface_to_volumes(inventory, number.DeviceType,
                     number.DeviceNumber, device_data.DevInst);
+            } else {
+                discovery_issue(inventory, GetLastError(), L"map storage interface to volume");
             }
             CloseHandle(handle);
+        } else {
+            discovery_issue(inventory, GetLastError(), L"open storage interface");
         }
         free(detail);
     }
@@ -605,6 +634,11 @@ AppStatus inventory_build(DeviceInventory *inventory, AppError *error) {
     if (status == APP_OK) {
         map_device_interfaces(inventory);
         inventory_sort(inventory);
+        if (inventory->skipped_transient != 0) {
+            set_error(error, APP_DIAGNOSTIC_INCOMPLETE, inventory->last_error,
+                inventory->last_operation);
+            status = APP_DIAGNOSTIC_INCOMPLETE;
+        }
     }
     return status;
 }

@@ -21,12 +21,14 @@ __declspec(dllimport) LPWSTR *WINAPI CommandLineToArgvW(LPCWSTR, int *);
 static int interactive_console(void) {
     DWORD input_mode;
     DWORD error_mode;
+    DWORD output_mode;
     HANDLE input;
     HANDLE error_output;
     input = GetStdHandle(STD_INPUT_HANDLE);
     error_output = GetStdHandle(STD_ERROR_HANDLE);
     return input != INVALID_HANDLE_VALUE && error_output != INVALID_HANDLE_VALUE &&
-        GetConsoleMode(input, &input_mode) && GetConsoleMode(error_output, &error_mode);
+        GetConsoleMode(input, &input_mode) && GetConsoleMode(error_output, &error_mode) &&
+        GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &output_mode);
 }
 
 static int confirm_blocker_action(const BlockerFinding *finding) {
@@ -95,13 +97,20 @@ static int act_on_one_pid(
 
     diagnostic_report_init(&fresh);
     diagnostic_scan(inventory, target, &fresh, &error);
+    if ((fresh.issue_flags & (DIAG_ISSUE_TIMEOUT | DIAG_ISSUE_UNRESOLVED)) != 0 ||
+        (fresh.last_operation != NULL && text_iequals(fresh.last_operation, L"enumerate-services"))) {
+        output_write(message_stream,
+            L"Process action refused: diagnostic safety checks did not finish. Increase --scan-timeout or resolve the reported inspection error, then retry.\r\n");
+        diagnostic_report_dispose(&fresh);
+        return -1;
+    }
     finding = find_pid_finding(&fresh, pid);
     if (finding == NULL) {
         output_printf(message_stream,
             L"Refusing process action: PID %lu is not a current blocker for this device.\r\n",
             (unsigned long)pid);
         diagnostic_report_dispose(&fresh);
-        return -1;
+        return authorized_on_command_line ? -1 : 0;
     }
 
     confirmed = authorized_on_command_line && command->assume_yes;
@@ -190,9 +199,8 @@ static int handle_blocker_actions(
             if (prior == index &&
                 (initial_report->findings[index].classification == DIAGNOSTIC_BLOCKING_CANDIDATE ||
                  initial_report->findings[index].classification == DIAGNOSTIC_PROCESS_ON_DEVICE)) {
-                output_printf(command->format == OUTPUT_TSV ? 0 : 1,
-                    L"To authorize this blocker, rerun with --kill-blocker %lu --yes.\r\n",
-                    (unsigned long)initial_report->findings[index].pid);
+                output_recovery_command(command, &inventory->volumes[target->volume_index],
+                    initial_report->findings[index].pid);
             }
         }
         return 0;
@@ -211,7 +219,6 @@ static int handle_blocker_actions(
         if (result < 0) return -1;
         if (result > 0) {
             acted = 1;
-            break;
         }
     }
     return acted;
@@ -236,7 +243,17 @@ static int run_inventory_command(
     memset(&target, 0, sizeof(target));
     action_message_stream = command->format == OUTPUT_TSV ? 0 : 1;
     status = inventory_build(&inventory, &error);
-    if (status != APP_OK) {
+    if (status == APP_DIAGNOSTIC_INCOMPLETE) {
+        output_printf(1, L"Discovery incomplete: %u item(s) could not be inspected.\r\n",
+            (unsigned)inventory.skipped_transient);
+        output_app_error(&error);
+        output_write(1, L"Check the device connection and permissions, then rerun list.\r\n");
+        if (command->kind == COMMAND_EJECT) {
+            output_write(1, L"Removal was not attempted because the full device scope could not be verified.\r\n");
+            inventory_dispose(&inventory);
+            return APP_DIAGNOSTIC_INCOMPLETE;
+        }
+    } else if (status != APP_OK) {
         output_app_error(&error);
         inventory_dispose(&inventory);
         return status == APP_OUT_OF_MEMORY ? APP_INTERNAL_ERROR : status;
@@ -244,14 +261,19 @@ static int run_inventory_command(
 
     if (command->kind == COMMAND_LIST) {
         status = output_inventory(&inventory, command->format)
-            ? APP_OK : APP_INTERNAL_ERROR;
+            ? (inventory.skipped_transient ? APP_DIAGNOSTIC_INCOMPLETE : APP_OK) : APP_INTERNAL_ERROR;
         inventory_dispose(&inventory);
         return status;
     }
 
-    status = target_resolve(&inventory, &command->selector, &target, &error);
+    status = target_resolve_mode(&inventory, &command->selector,
+        command->card_mode, &target, &error);
     if (status == APP_NOT_FOUND) {
         output_write(1, L"No supported removable device matched the target.\r\n");
+        if (error.operation != NULL) output_app_error(&error);
+        if (command->selector.value != NULL)
+            output_printf(1, L"Requested target: %ls. Run usb-eject.exe list to see available targets.\r\n",
+                command->selector.value);
     } else if (status == APP_AMBIGUOUS) {
         output_ambiguous(&inventory, &target);
     } else if (status == APP_UNSUPPORTED) {
@@ -279,14 +301,9 @@ static int run_inventory_command(
 
     if (command->kind == COMMAND_EJECT &&
         command->selector.kind == SELECTOR_THIS) {
-        status = portable_launch(command, &inventory.volumes[target.volume_index], &error);
-        if (status != APP_OK) {
+        status = portable_launch(command, &inventory, &target, &error);
+        if (status != APP_STARTED) {
             output_app_error(&error);
-        } else if (!command->quiet) {
-            if (!output_write(0,
-                    L"Started a temporary continuation; it will eject the device after this process exits.\r\n")) {
-                status = APP_INTERNAL_ERROR;
-            }
         }
         resolved_target_dispose(&target);
         inventory_dispose(&inventory);
@@ -294,13 +311,18 @@ static int run_inventory_command(
     }
 
     if (command->kind == COMMAND_DIAGNOSE) {
-        if (command->format == OUTPUT_TEXT && !output_target(&inventory, &target)) {
+        if (command->format == OUTPUT_TEXT && !output_target_operation(&inventory, &target, command)) {
             resolved_target_dispose(&target);
             inventory_dispose(&inventory);
             return APP_INTERNAL_ERROR;
         }
         diagnostic_report_init(&diagnostic_report);
         status = diagnostic_scan(&inventory, &target, &diagnostic_report, &error);
+        if (inventory.skipped_transient) {
+            diagnostic_report.issue_flags |= DIAG_ISSUE_UNRESOLVED;
+            diagnostic_report.completeness = diagnostic_completeness_from_issues(diagnostic_report.issue_flags);
+            status = APP_DIAGNOSTIC_INCOMPLETE;
+        }
         output_ok = output_diagnostic(&diagnostic_report, NULL, command->format, 0);
         diagnostic_report_dispose(&diagnostic_report);
         resolved_target_dispose(&target);
@@ -308,13 +330,13 @@ static int run_inventory_command(
         return output_ok ? status : APP_INTERNAL_ERROR;
     }
 
-    if (!command->quiet && !output_target(&inventory, &target)) {
+    if (!command->quiet && !output_target_operation(&inventory, &target, command)) {
         resolved_target_dispose(&target);
         inventory_dispose(&inventory);
         return APP_INTERNAL_ERROR;
     }
     if (command->card_mode) {
-        status = eject_card_media(&inventory.volumes[target.volume_index], &eject_result);
+        status = eject_card_target(&inventory, &target, &eject_result);
     } else {
         status = eject_parent_device(target.removal_devinst, &eject_result);
     }
@@ -352,9 +374,9 @@ static int run_inventory_command(
                 diagnostic_report_init(&diagnostic_report);
                 diagnostic_scan(&inventory, &target, &diagnostic_report, &error);
                 if (diagnostic_report.finding_count != 0 ||
-                    diagnostic_report.completeness != DIAGNOSTIC_COMPLETE) {
+                    (diagnostic_report.issue_flags & DIAG_ISSUE_UNRESOLVED) != 0) {
                     output_write(action_message_stream,
-                        L"The device still has blockers or an incomplete scan; ejection was not retried.\r\n");
+                        L"Known blockers or an unresolved inspection error remain; ejection was not retried.\r\n");
                     output_diagnostic_append(&diagnostic_report, &eject_result,
                         command->format, 1);
                     diagnostic_report_dispose(&diagnostic_report);
@@ -362,17 +384,20 @@ static int run_inventory_command(
                     inventory_dispose(&inventory);
                     return APP_BUSY;
                 }
+                if (diagnostic_report.completeness != DIAGNOSTIC_COMPLETE) {
+                    output_write(action_message_stream,
+                        L"Diagnostic coverage is limited; the safe-removal request will still check whether removal is allowed.\r\n");
+                }
                 diagnostic_report_dispose(&diagnostic_report);
                 output_write(action_message_stream,
-                    L"No blockers remain; retrying safe removal once.\r\n");
+                    L"No known blockers remain; retrying safe removal once.\r\n");
                 if (command->card_mode) {
-                    status = eject_card_media(&inventory.volumes[target.volume_index],
-                        &eject_result);
+                    status = eject_card_target(&inventory, &target, &eject_result);
                 } else {
                     status = eject_parent_device(target.removal_devinst, &eject_result);
                 }
                 if (status == APP_OK) {
-                    if (!output_write(0, L"Safe-removal retry succeeded.\r\n")) {
+                    if (!command->quiet && !output_write(0, L"Safe-removal retry succeeded.\r\n")) {
                         status = APP_INTERNAL_ERROR;
                     }
                 } else if (command->format == OUTPUT_TEXT) {
@@ -424,6 +449,7 @@ int main(void) {
     }
     raw_arguments = arguments;
     continuation = 0;
+    original_pid = 0;
     expected_instance_id = NULL;
     expected_volume_guid = NULL;
     if (argument_count >= 2 &&
@@ -473,25 +499,20 @@ int main(void) {
         }
         wcscpy(expected_instance_id, arguments[3]);
         wcscpy(expected_volume_guid, arguments[4]);
-        app_error_clear(&continuation_error);
-        result = portable_wait_for_process(original_pid, &continuation_error);
-        if (result != APP_OK) {
-            output_app_error(&continuation_error);
-            portable_schedule_cleanup();
-            free(expected_instance_id);
-            free(expected_volume_guid);
-            LocalFree(raw_arguments);
-            return result;
-        }
         arguments += 4;
         argument_count -= 4;
     }
 
     command_init(&command);
     if (!cli_parse(argument_count, arguments, &command, &parse_error)) {
-        output_printf(1, L"Invalid command line near argument %d: %ls.\r\n",
-            parse_error.argument_index, parse_error.message);
-        output_write(1, L"Run usb-eject.exe help for usage.\r\n");
+        output_printf(1, L"Invalid command line at '%ls': %ls.\r\n",
+            parse_error.argument_index >= 0 && parse_error.argument_index < argument_count ?
+                arguments[parse_error.argument_index] : L"end of command",
+            parse_error.message != NULL ? parse_error.message : L"out of memory");
+        output_write(1, L"Usage: usb-eject.exe list [--format text|tsv]\r\n"
+            L"       usb-eject.exe diagnose|eject <drive-or-path> [options]\r\n");
+        output_write(1, L"Examples: usb-eject.exe diagnose E: | usb-eject.exe eject --label=\"Work Backup\"\r\n"
+            L"Run usb-eject.exe help for all options.\r\n");
         command_dispose(&command);
         LocalFree(raw_arguments);
         if (continuation) portable_schedule_cleanup();
@@ -500,7 +521,7 @@ int main(void) {
         return APP_USAGE;
     }
     if (continuation &&
-        (command.kind != COMMAND_EJECT || command.selector.kind != SELECTOR_MOUNT)) {
+        (command.kind != COMMAND_EJECT || command.selector.kind != SELECTOR_MOUNT || command.result_file == NULL)) {
         output_write(1, L"Invalid internal continuation operation.\r\n");
         command_dispose(&command);
         LocalFree(raw_arguments);
@@ -511,12 +532,37 @@ int main(void) {
     }
     LocalFree(raw_arguments);
 
+    if (!continuation && command.result_file != NULL && command.selector.kind != SELECTOR_THIS) {
+        output_write(1, L"--result-file is valid only with eject --this.\r\n");
+        command_dispose(&command);
+        return APP_USAGE;
+    }
+    if (continuation) {
+        app_error_clear(&continuation_error);
+        result = portable_wait_for_process(original_pid, &continuation_error);
+        if (result != APP_OK) {
+            output_app_error(&continuation_error);
+            portable_finish_result(command.result_file, result);
+            portable_schedule_cleanup();
+            command_dispose(&command);
+            free(expected_instance_id);
+            free(expected_volume_guid);
+            return result;
+        }
+    }
+    output_set_verbose(command.verbose);
+    diagnostic_configure(command.scan_timeout_ms, command.format == OUTPUT_TEXT && !command.quiet);
+
     if (command.kind == COMMAND_HELP) result =
         output_command_help(command.help_topic) ? APP_OK : APP_INTERNAL_ERROR;
     else if (command.kind == COMMAND_VERSION) result = output_version() ? APP_OK : APP_INTERNAL_ERROR;
     else result = run_inventory_command(&command,
         expected_instance_id, expected_volume_guid);
 
+    if (continuation && !portable_finish_result(command.result_file, result)) {
+        output_write(1, L"Could not record the final result; the receipt remains pending.\r\n");
+        result = APP_INTERNAL_ERROR;
+    }
     command_dispose(&command);
     if (continuation) portable_schedule_cleanup();
     free(expected_instance_id);

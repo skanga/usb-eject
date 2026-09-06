@@ -13,6 +13,26 @@
 #define SYSTEM_EXTENDED_HANDLE_INFORMATION 64
 #define STATUS_INFO_LENGTH_MISMATCH ((LONG)0xc0000004L)
 
+static DWORD scan_budget_ms = 15000;
+static int scan_progress;
+
+void diagnostic_configure(DWORD budget_ms, int progress) {
+    scan_budget_ms = budget_ms != 0 ? budget_ms : 15000;
+    scan_progress = progress;
+}
+
+static void scan_progress_message(size_t inspected, int finished) {
+    wchar_t message[160];
+    DWORD mode, written;
+    HANDLE stream = GetStdHandle(STD_ERROR_HANDLE);
+    int length;
+    if (!scan_progress || !GetConsoleMode(stream, &mode)) return;
+    length = _snwprintf(message, 160, L"%ls: %u file handles inspected (budget %lu ms).\r\n",
+        finished ? L"Scan finished" : L"Scanning blockers",
+        (unsigned)inspected, (unsigned long)scan_budget_ms);
+    if (length > 0) WriteConsoleW(stream, message, (DWORD)length, &written, NULL);
+}
+
 typedef LONG (NTAPI *NtQuerySystemInformationFn)(ULONG, PVOID, ULONG, PULONG);
 
 typedef struct {
@@ -638,50 +658,30 @@ static int resolve_worker_start(ResolveWorker *worker, DWORD *error_code) {
     return 1;
 }
 
-typedef struct {
-    HANDLE pipe;
-    ResolveResponse *response;
-    int succeeded;
-} ResponseReadContext;
-
-static DWORD WINAPI read_response_thread(LPVOID parameter) {
-    ResponseReadContext *context;
-    context = (ResponseReadContext *)parameter;
-    context->succeeded = read_exact(context->pipe, context->response,
-        sizeof(*context->response));
-    return 0;
-}
-
-static int read_response_with_timeout(
-    ResolveWorker *worker,
-    ResolveResponse *response,
-    int *timed_out,
-    DWORD *error_code)
-{
-    ResponseReadContext context;
-    HANDLE thread;
-    DWORD wait_result;
-    memset(&context, 0, sizeof(context));
-    context.pipe = worker->output;
-    context.response = response;
-    thread = CreateThread(NULL, 0, read_response_thread, &context, 0, NULL);
-    if (thread == NULL) {
-        *error_code = GetLastError();
-        return 0;
-    }
-    wait_result = WaitForSingleObject(thread, 1000);
-    if (wait_result == WAIT_TIMEOUT) {
-        *timed_out = 1;
-        *error_code = WAIT_TIMEOUT;
-        resolve_worker_stop(worker);
-        WaitForSingleObject(thread, 1000);
-        CloseHandle(thread);
-        return 0;
-    }
-    CloseHandle(thread);
-    if (wait_result != WAIT_OBJECT_0 || !context.succeeded) {
-        *error_code = ERROR_INVALID_DATA;
-        return 0;
+/* Poll only available bytes: both response header and payload share one deadline. */
+static int read_with_deadline(HANDLE pipe, void *buffer, DWORD size,
+    DWORD started, DWORD budget, int *timed_out, DWORD *error_code) {
+    DWORD offset = 0;
+    DWORD available, received, amount;
+    unsigned polls = 0;
+    while (offset < size) {
+        if (GetTickCount() - started >= budget) {
+            *timed_out = 1;
+            *error_code = WAIT_TIMEOUT;
+            return 0;
+        }
+        available = 0;
+        if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL)) {
+            *error_code = GetLastError();
+            return 0;
+        }
+        if (available == 0) { Sleep(++polls < 64 ? 0 : 1); continue; }
+        amount = available < size - offset ? available : size - offset;
+        if (!ReadFile(pipe, (unsigned char *)buffer + offset, amount, &received, NULL) || received == 0) {
+            *error_code = GetLastError();
+            return 0;
+        }
+        offset += received;
     }
     return 1;
 }
@@ -690,8 +690,11 @@ static wchar_t *query_nt_file_path(
     ResolveWorker *worker,
     HANDLE handle,
     DWORD *error_code,
-    int *timed_out)
+    int *timed_out,
+    DWORD remaining_ms)
 {
+    DWORD started = GetTickCount();
+    DWORD budget = remaining_ms < 1000 ? remaining_ms : 1000;
     ResolveRequest request;
     ResolveResponse response;
     HANDLE remote_handle;
@@ -710,7 +713,7 @@ static wchar_t *query_nt_file_path(
         resolve_worker_stop(worker);
         return NULL;
     }
-    if (!read_response_with_timeout(worker, &response, timed_out, error_code)) {
+    if (!read_with_deadline(worker->output, &response, sizeof(response), started, budget, timed_out, error_code)) {
         if (worker->process != NULL) resolve_worker_stop(worker);
         return NULL;
     }
@@ -728,11 +731,11 @@ static wchar_t *query_nt_file_path(
         *error_code = ERROR_NOT_ENOUGH_MEMORY;
         return NULL;
     }
-    if (!read_exact(worker->output, path,
-            response.character_count * sizeof(wchar_t)) ||
+    if (!read_with_deadline(worker->output, path,
+            response.character_count * sizeof(wchar_t), started, budget, timed_out, error_code) ||
         path[response.character_count - 1] != L'\0') {
         free(path);
-        *error_code = ERROR_INVALID_DATA;
+        if (!*timed_out) *error_code = ERROR_INVALID_DATA;
         resolve_worker_stop(worker);
         return NULL;
     }
@@ -745,10 +748,8 @@ static int path_matches_target(
     const wchar_t *path)
 {
     size_t index;
-    const VolumeInfo *selected;
-    selected = &inventory->volumes[target->volume_index];
     for (index = 0; index < inventory->count; index++) {
-        if (inventory->volumes[index].removal_devinst == selected->removal_devinst &&
+        if (target_volume_in_scope(inventory, target, index) &&
             inventory->volumes[index].native_path != NULL &&
             text_path_is_at_or_below(path, inventory->volumes[index].native_path)) {
             return 1;
@@ -768,7 +769,6 @@ static int append_finding(
     BlockerFinding *new_items;
     size_t new_capacity;
     BlockerFinding *finding;
-    const VolumeInfo *selected;
     const VolumeInfo *volume;
     size_t volume_index;
     size_t root_length;
@@ -798,16 +798,16 @@ static int append_finding(
     finding->process_image = wide_duplicate(process->image);
     finding->process_user = wide_duplicate(process->user);
     finding->nt_path = wide_duplicate(path);
-    selected = &inventory->volumes[target->volume_index];
     for (volume_index = 0; volume_index < inventory->count; volume_index++) {
         volume = &inventory->volumes[volume_index];
-        if (volume->removal_devinst != selected->removal_devinst ||
-            volume->native_path == NULL || volume->mount_count == 0 ||
+        if (!target_volume_in_scope(inventory, target, volume_index) ||
+            volume->native_path == NULL ||
             !text_path_is_at_or_below(path, volume->native_path)) continue;
         root_length = wcslen(volume->native_path);
         suffix = path + root_length;
         while (*suffix == L'\\' || *suffix == L'/') suffix++;
-        mount = volume->mount_points[0];
+        mount = volume->mount_count ? volume->mount_points[0] : volume->volume_guid;
+        if (mount == NULL) break;
         mount_length = wcslen(mount);
         suffix_length = wcslen(suffix);
         if (mount_length <= (size_t)-1 - suffix_length - 2) {
@@ -841,14 +841,12 @@ static int process_image_matches_target(
     const ResolvedTarget *target,
     const wchar_t *image)
 {
-    const VolumeInfo *selected;
     size_t volume_index;
     size_t mount_index;
     if (image == NULL) return 0;
-    selected = &inventory->volumes[target->volume_index];
     for (volume_index = 0; volume_index < inventory->count; volume_index++) {
         const VolumeInfo *volume = &inventory->volumes[volume_index];
-        if (volume->removal_devinst != selected->removal_devinst) continue;
+        if (!target_volume_in_scope(inventory, target, volume_index)) continue;
         for (mount_index = 0; mount_index < volume->mount_count; mount_index++) {
             if (text_path_is_at_or_below(image, volume->mount_points[mount_index])) return 1;
         }
@@ -1018,12 +1016,23 @@ AppStatus diagnostic_scan(
     ResolveWorker resolve_worker;
     HANDLE process_snapshot;
     PROCESSENTRY32W process_entry;
+    DWORD started = GetTickCount();
+    DWORD progress_tick = started;
+    DWORD elapsed;
 
     app_error_clear(error);
     diagnostic_report_init(report);
     memset(&cache, 0, sizeof(cache));
     memset(&resolve_worker, 0, sizeof(resolve_worker));
     report->debug_privilege_enabled = enable_debug_privilege();
+    scan_progress_message(0, 0);
+    for (index = 0; index < inventory->count; index++) {
+        if (target_volume_in_scope(inventory, target, (size_t)index) &&
+            inventory->volumes[index].native_path == NULL) {
+            report->issue_flags |= DIAG_ISSUE_UNRESOLVED;
+            report_inspection_error(report, ERROR_INVALID_DATA, L"missing-native-volume-path");
+        }
+    }
 
     if (GetModuleFileNameW(NULL, module, 32768) == 0) {
         if (error != NULL) {
@@ -1093,6 +1102,16 @@ AppStatus diagnostic_scan(
     calibration_value = (ULONG_PTR)calibration;
 
     for (index = 0; index < snapshot->number_of_handles; index++) {
+        elapsed = GetTickCount() - started;
+        if (elapsed >= scan_budget_ms) {
+            report->issue_flags |= DIAG_ISSUE_TIMEOUT;
+            report_inspection_error(report, WAIT_TIMEOUT, L"scan-budget-exhausted");
+            break;
+        }
+        if (GetTickCount() - progress_tick >= 1000) {
+            scan_progress_message(report->inspected_file_handle_count, 0);
+            progress_tick = GetTickCount();
+        }
         native = &snapshot->handles[index];
         if (native->object_type_index != file_type ||
             native->unique_process_id > 0xffffffffU) continue;
@@ -1129,8 +1148,9 @@ AppStatus diagnostic_scan(
         report->inspected_file_handle_count++;
         path_error = ERROR_SUCCESS;
         path_timed_out = 0;
+        elapsed = GetTickCount() - started;
         path = query_nt_file_path(&resolve_worker, duplicate,
-            &path_error, &path_timed_out);
+            &path_error, &path_timed_out, elapsed < scan_budget_ms ? scan_budget_ms - elapsed : 0);
         CloseHandle(duplicate);
         if (path == NULL) {
             if (path_timed_out) {
@@ -1159,6 +1179,7 @@ AppStatus diagnostic_scan(
     }
 
     resolve_worker_stop(&resolve_worker);
+    if (GetTickCount() - started >= scan_budget_ms) goto finish_scan;
     process_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (process_snapshot == INVALID_HANDLE_VALUE) {
         report->issue_flags |= DIAG_ISSUE_UNRESOLVED;
@@ -1168,6 +1189,7 @@ AppStatus diagnostic_scan(
         process_entry.dwSize = sizeof(process_entry);
         if (Process32FirstW(process_snapshot, &process_entry)) {
             do {
+                if (GetTickCount() - started >= scan_budget_ms) break;
                 process = process_cache_get(&cache, process_entry.th32ProcessID);
                 if (process == NULL) {
                     report->issue_flags |= DIAG_ISSUE_UNRESOLVED;
@@ -1188,7 +1210,13 @@ AppStatus diagnostic_scan(
             break;
         }
     }
-    attach_service_names(report);
+    if (GetTickCount() - started < scan_budget_ms) attach_service_names(report);
+finish_scan:
+    if (GetTickCount() - started >= scan_budget_ms) {
+        report->issue_flags |= DIAG_ISSUE_TIMEOUT;
+        report_inspection_error(report, WAIT_TIMEOUT, L"scan-budget-exhausted");
+    }
+    scan_progress_message(report->inspected_file_handle_count, 1);
     diagnostic_sort_report(report);
     process_cache_dispose(&cache);
     free(buffer);

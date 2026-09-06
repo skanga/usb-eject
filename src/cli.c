@@ -33,6 +33,7 @@ static wchar_t *duplicate_text(const wchar_t *value) {
 
 void command_init(Command *command) {
     memset(command, 0, sizeof(*command));
+    command->scan_timeout_ms = 15000;
 }
 
 void command_dispose(Command *command) {
@@ -41,6 +42,7 @@ void command_dispose(Command *command) {
     }
     free(command->selector.value);
     free(command->authorized_pids);
+    free(command->result_file);
     command_init(command);
 }
 
@@ -147,8 +149,13 @@ static int option_value(
     const wchar_t **value,
     ParseError *error)
 {
-    if (*index + 1 >= argc) {
-        set_error(error, *index, L"option requires a value");
+    const wchar_t *equals = wcschr(argv[*index], L'=');
+    if (equals != NULL) {
+        *value = equals + 1;
+        return 1;
+    }
+    if (*index + 1 >= argc || wcsncmp(argv[*index + 1], L"--", 2) == 0) {
+        set_error(error, *index, L"option requires a value; use --option=value for a value beginning with '--'");
         return 0;
     }
     (*index)++;
@@ -156,11 +163,18 @@ static int option_value(
     return 1;
 }
 
+static int option_is(const wchar_t *argument, const wchar_t *name) {
+    size_t length = wcslen(name);
+    return _wcsnicmp(argument, name, length) == 0 &&
+        (argument[length] == L'\0' || argument[length] == L'=');
+}
+
 int cli_parse(int argc, wchar_t **argv, Command *command, ParseError *error) {
     int index;
     const wchar_t *argument;
     const wchar_t *value;
     DWORD pid;
+    int timeout_index = -1;
 
     if (error != NULL) {
         error->message = NULL;
@@ -203,16 +217,21 @@ int cli_parse(int argc, wchar_t **argv, Command *command, ParseError *error) {
         }
         return 1;
     }
-    if ((command->kind == COMMAND_LIST || command->kind == COMMAND_DIAGNOSE ||
-         command->kind == COMMAND_EJECT) && argc == 3 && help_alias(argv[2])) {
-        command->help_topic = command->kind;
-        command->kind = COMMAND_HELP;
-        return 1;
+    if (command->kind == COMMAND_LIST || command->kind == COMMAND_DIAGNOSE ||
+        command->kind == COMMAND_EJECT) {
+        for (index = 2; index < argc; index++) {
+            if ((argc == 3 && text_iequals(argv[index], L"help")) || text_iequals(argv[index], L"--help") ||
+                text_iequals(argv[index], L"-h") || text_iequals(argv[index], L"/?")) {
+                command->help_topic = command->kind;
+                command->kind = COMMAND_HELP;
+                return 1;
+            }
+        }
     }
 
     for (index = 2; index < argc; index++) {
         argument = argv[index];
-        if (text_iequals(argument, L"--format")) {
+        if (option_is(argument, L"--format")) {
             if (!option_value(argc, argv, &index, &value, error)) return 0;
             if (text_iequals(value, L"text")) command->format = OUTPUT_TEXT;
             else if (text_iequals(value, L"tsv")) command->format = OUTPUT_TSV;
@@ -220,15 +239,15 @@ int cli_parse(int argc, wchar_t **argv, Command *command, ParseError *error) {
                 set_error(error, index, L"format must be text or tsv");
                 return 0;
             }
-        } else if (text_iequals(argument, L"--letter") ||
-                   text_iequals(argument, L"--mount") ||
-                   text_iequals(argument, L"--label") ||
-                   text_iequals(argument, L"--name")) {
+        } else if (option_is(argument, L"--letter") ||
+                   option_is(argument, L"--mount") ||
+                   option_is(argument, L"--label") ||
+                   option_is(argument, L"--name")) {
             SelectorKind kind;
             if (!option_value(argc, argv, &index, &value, error)) return 0;
-            if (text_iequals(argument, L"--letter")) kind = SELECTOR_LETTER;
-            else if (text_iequals(argument, L"--mount")) kind = SELECTOR_MOUNT;
-            else if (text_iequals(argument, L"--label")) kind = SELECTOR_LABEL;
+            if (option_is(argument, L"--letter")) kind = SELECTOR_LETTER;
+            else if (option_is(argument, L"--mount")) kind = SELECTOR_MOUNT;
+            else if (option_is(argument, L"--label")) kind = SELECTOR_LABEL;
             else kind = SELECTOR_NAME;
             if (kind == SELECTOR_LETTER && !valid_drive_letter(value)) {
                 set_error(error, index,
@@ -247,11 +266,29 @@ int cli_parse(int argc, wchar_t **argv, Command *command, ParseError *error) {
             command->card_mode = 1;
         } else if (text_iequals(argument, L"--quiet")) {
             command->quiet = 1;
+        } else if (text_iequals(argument, L"--verbose")) {
+            command->verbose = 1;
+        } else if (option_is(argument, L"--scan-timeout")) {
+            timeout_index = index;
+            if (!option_value(argc, argv, &index, &value, error)) return 0;
+            if (!parse_pid(value, &pid) || pid > 600000) {
+                set_error(error, index, L"--scan-timeout expects milliseconds from 1 to 600000");
+                return 0;
+            }
+            command->scan_timeout_ms = pid;
+        } else if (option_is(argument, L"--result-file")) {
+            if (!option_value(argc, argv, &index, &value, error)) return 0;
+            if (value[0] == L'\0' || command->result_file != NULL) {
+                set_error(error, index, L"--result-file expects one nonempty path");
+                return 0;
+            }
+            command->result_file = duplicate_text(value);
+            if (command->result_file == NULL) return 0;
         } else if (text_iequals(argument, L"--no-prompt")) {
             command->no_prompt = 1;
         } else if (text_iequals(argument, L"--yes")) {
             command->assume_yes = 1;
-        } else if (text_iequals(argument, L"--kill-blocker")) {
+        } else if (option_is(argument, L"--kill-blocker")) {
             if (!option_value(argc, argv, &index, &value, error)) return 0;
             if (!parse_pid(value, &pid)) {
                 set_error(error, index, L"blocker PID must be a positive decimal integer");
@@ -276,7 +313,7 @@ int cli_parse(int argc, wchar_t **argv, Command *command, ParseError *error) {
     }
     if (command->kind != COMMAND_EJECT &&
         (command->card_mode || command->quiet || command->no_prompt ||
-         command->assume_yes || command->authorized_pid_count != 0)) {
+         command->assume_yes || command->authorized_pid_count != 0 || command->result_file != NULL)) {
         set_error(error, 2, L"ejection option used with a non-eject command");
         return 0;
     }
@@ -290,6 +327,10 @@ int cli_parse(int argc, wchar_t **argv, Command *command, ParseError *error) {
     }
     if (command->kind == COMMAND_LIST && command->selector.kind != SELECTOR_NONE) {
         set_error(error, 2, L"list does not accept a target");
+        return 0;
+    }
+    if (command->kind == COMMAND_LIST && timeout_index >= 0) {
+        set_error(error, timeout_index, L"--scan-timeout is valid only with diagnose or eject");
         return 0;
     }
     return 1;

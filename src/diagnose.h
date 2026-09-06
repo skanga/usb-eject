@@ -68,6 +68,7 @@ const wchar_t *diagnostic_classification_name(DiagnosticClassification value);
 void diagnostic_sort_report(DiagnosticReport *report);
 void diagnostic_report_init(DiagnosticReport *report);
 void diagnostic_report_dispose(DiagnosticReport *report);
+void diagnostic_configure(DWORD budget_ms, int progress);
 AppStatus diagnostic_scan(
     const DeviceInventory *inventory,
     const ResolvedTarget *target,

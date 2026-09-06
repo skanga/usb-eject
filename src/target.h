@@ -13,9 +13,16 @@ typedef struct {
     size_t sibling_volume_count;
     size_t distinct_match_count;
     size_t *distinct_volume_indexes;
+    int media_scope;
 } ResolvedTarget;
 
 void resolved_target_dispose(ResolvedTarget *resolved);
+int target_same_media(const VolumeInfo *left, const VolumeInfo *right);
+int target_volume_in_scope(const DeviceInventory *inventory,
+    const ResolvedTarget *target, size_t index);
+AppStatus target_resolve_mode(const DeviceInventory *inventory,
+    const TargetSelector *selector, int media_scope,
+    ResolvedTarget *resolved, AppError *error);
 
 AppStatus target_resolve(
     const DeviceInventory *inventory,

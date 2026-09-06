@@ -15,6 +15,7 @@ typedef enum {
     APP_NO_MEDIA = 8,
     APP_DIAGNOSTIC_INCOMPLETE = 9,
     APP_BLOCKER_ACTION_FAILED = 10,
+    APP_STARTED = 11,
     APP_OUT_OF_MEMORY = 100
 } AppStatus;
 

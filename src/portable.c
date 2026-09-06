@@ -3,10 +3,13 @@
 
 #include <windows.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <wchar.h>
 
 #include "portable.h"
+#include "output.h"
+#include "text.h"
 
 typedef BOOLEAN (WINAPI *RtlGenRandomFn)(PVOID, ULONG);
 
@@ -102,6 +105,14 @@ int portable_build_command_line(
     if (command->card_mode) builder_append(&builder, L" --card");
     if (command->quiet) builder_append(&builder, L" --quiet");
     if (command->no_prompt) builder_append(&builder, L" --no-prompt");
+    if (command->verbose) builder_append(&builder, L" --verbose");
+    builder_append(&builder, L" --scan-timeout ");
+    _snwprintf(number, 32, L"%lu", (unsigned long)command->scan_timeout_ms);
+    builder_append(&builder, number);
+    if (command->result_file != NULL) {
+        builder_append(&builder, L" --result-file");
+        builder_space_arg(&builder, command->result_file);
+    }
     for (index = 0; index < command->authorized_pid_count; index++) {
         builder_append(&builder, L" --kill-blocker ");
         _snwprintf(number, 32, L"%lu",
@@ -180,9 +191,41 @@ static void set_portable_error(AppError *error, DWORD code, const wchar_t *opera
     error->operation = operation;
 }
 
+int portable_path_outside_target(const wchar_t *path, const DeviceInventory *inventory,
+    const ResolvedTarget *target) {
+    wchar_t mount[32768];
+    wchar_t guid[MAX_PATH + 1];
+    size_t index;
+    if (!GetVolumePathNameW(path, mount, 32768) ||
+        !GetVolumeNameForVolumeMountPointW(mount, guid, MAX_PATH + 1)) return 0;
+    for (index = 0; index < inventory->count; index++) {
+        if (target_volume_in_scope(inventory, target, index) &&
+            text_iequals(guid, inventory->volumes[index].volume_guid)) return 0;
+    }
+    return 1;
+}
+
+int portable_finish_result(const wchar_t *path, int exit_code) {
+    HANDLE file;
+    char result[64];
+    DWORD written;
+    int length;
+    int ok;
+    if (path == NULL) return 0;
+    file = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    length = _snprintf(result, sizeof(result), "exit_code=%d\r\n", exit_code);
+    ok = length > 0 && WriteFile(file, result, (DWORD)length, &written, NULL) &&
+        written == (DWORD)length && FlushFileBuffers(file);
+    CloseHandle(file);
+    return ok;
+}
+
 AppStatus portable_launch(
     const Command *command,
-    const VolumeInfo *volume,
+    const DeviceInventory *inventory,
+    const ResolvedTarget *target,
     AppError *error)
 {
     wchar_t source[32768];
@@ -196,7 +239,19 @@ AppStatus portable_launch(
     STARTUPINFOW startup;
     PROCESS_INFORMATION process;
     DWORD code;
+    wchar_t receipt[32768];
+    HANDLE result_file;
+    DWORD written;
+    Command continuation_command;
+    const VolumeInfo *volume;
+    static const char pending[] = "usb-eject-result-v1\r\nstate=pending\r\n";
     app_error_clear(error);
+    if (inventory == NULL || target == NULL || inventory->volumes == NULL ||
+        target->volume_index >= inventory->count) {
+        set_portable_error(error, ERROR_INVALID_PARAMETER, L"prepare --this target");
+        return APP_UNSUPPORTED;
+    }
+    volume = &inventory->volumes[target->volume_index];
     if (command == NULL || volume == NULL || volume->mount_count == 0 ||
         volume->instance_id == NULL || volume->instance_id[0] == L'\0' ||
         volume->volume_guid == NULL || volume->volume_guid[0] == L'\0') {
@@ -212,6 +267,10 @@ AppStatus portable_launch(
     if (length == 0 || length >= 32760) {
         set_portable_error(error, GetLastError(), L"resolve temporary directory");
         return APP_INTERNAL_ERROR;
+    }
+    if (!portable_path_outside_target(temp, inventory, target)) {
+        set_portable_error(error, ERROR_INVALID_PARAMETER, L"temporary directory must be outside the device being removed");
+        return APP_UNSUPPORTED;
     }
     directory[0] = L'\0';
     for (attempt = 0; attempt < 8; attempt++) {
@@ -240,9 +299,43 @@ AppStatus portable_launch(
         set_portable_error(error, code, L"copy executable for --this");
         return code == ERROR_ACCESS_DENIED ? APP_ACCESS_DENIED : APP_INTERNAL_ERROR;
     }
+    if (command->result_file != NULL) {
+        length = GetFullPathNameW(command->result_file, 32768, receipt, NULL);
+        if (length == 0 || length >= 32768) receipt[0] = L'\0';
+    } else if (_snwprintf(receipt, 32768, L"%lsusb-eject-%ls.result", temp, random) < 0) {
+        receipt[0] = L'\0';
+    }
+    if (receipt[0] == L'\0' || !portable_path_outside_target(receipt, inventory, target)) {
+        DeleteFileW(destination);
+        RemoveDirectoryW(directory);
+        set_portable_error(error, ERROR_INVALID_PARAMETER, L"result receipt must be outside the device being removed");
+        return APP_UNSUPPORTED;
+    }
+    result_file = CreateFileW(receipt, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL, NULL);
+    if (result_file == INVALID_HANDLE_VALUE) {
+        code = GetLastError();
+        DeleteFileW(destination);
+        RemoveDirectoryW(directory);
+        set_portable_error(error, code, L"create new result receipt (choose a path that does not exist)");
+        return APP_INTERNAL_ERROR;
+    }
+    if (!WriteFile(result_file, pending, sizeof(pending) - 1, &written, NULL) ||
+        written != sizeof(pending) - 1 || !FlushFileBuffers(result_file)) {
+        code = GetLastError();
+        CloseHandle(result_file);
+        DeleteFileW(destination);
+        RemoveDirectoryW(directory);
+        set_portable_error(error, code, L"write pending result receipt");
+        return APP_INTERNAL_ERROR;
+    }
+    CloseHandle(result_file);
+    continuation_command = *command;
+    continuation_command.result_file = receipt;
     if (!portable_build_command_line(command_line, 32768, destination,
             GetCurrentProcessId(), volume->instance_id, volume->volume_guid,
-            volume->mount_points[0], command)) {
+            volume->mount_points[0], &continuation_command)) {
+        portable_finish_result(receipt, APP_INTERNAL_ERROR);
         DeleteFileW(destination);
         RemoveDirectoryW(directory);
         set_portable_error(error, ERROR_INSUFFICIENT_BUFFER, L"build continuation command");
@@ -252,8 +345,9 @@ AppStatus portable_launch(
     startup.cb = sizeof(startup);
     memset(&process, 0, sizeof(process));
     if (!CreateProcessW(destination, command_line, NULL, NULL, TRUE,
-            0, NULL, NULL, &startup, &process)) {
+            0, NULL, directory, &startup, &process)) {
         code = GetLastError();
+        portable_finish_result(receipt, code == ERROR_ACCESS_DENIED ? APP_ACCESS_DENIED : APP_INTERNAL_ERROR);
         DeleteFileW(destination);
         RemoveDirectoryW(directory);
         set_portable_error(error, code, L"start --this continuation");
@@ -261,7 +355,10 @@ AppStatus portable_launch(
     }
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
-    return APP_OK;
+    output_printf(command->format == OUTPUT_TSV ? 0 : 1,
+        L"Ejection started (exit 11); removal is pending. Final result receipt: %ls\r\n"
+        L"Wait for an exit_code line; only exit_code=0 means removal succeeded.\r\n", receipt);
+    return APP_STARTED;
 }
 
 AppStatus portable_wait_for_process(DWORD pid, AppError *error) {

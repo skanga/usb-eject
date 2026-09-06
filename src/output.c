@@ -13,6 +13,10 @@
 #define WC_ERR_INVALID_CHARS 0x00000080
 #endif
 
+static int verbose_output;
+
+void output_set_verbose(int verbose) { verbose_output = verbose; }
+
 static HANDLE stream_handle(int error_stream) {
     return GetStdHandle(error_stream ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
 }
@@ -77,7 +81,7 @@ int output_printf(int error_stream, const wchar_t *format, ...) {
 
 int output_help(void) {
     return output_write(0,
-        L"usb-eject 0.1.0\r\n"
+        L"usb-eject 0.2.0\r\n"
         L"\r\n"
         L"Usage:\r\n"
         L"  usb-eject.exe help | --help | -h | /?\r\n"
@@ -101,6 +105,9 @@ int output_help(void) {
         L"  --kill-blocker <pid>     Authorize one PID; may be repeated\r\n"
         L"  --yes                    Confirm explicitly authorized PIDs\r\n"
         L"  --format text|tsv        Select diagnostic format\r\n"
+        L"  --verbose               Include native paths and individual handles\r\n"
+        L"  --scan-timeout <ms>     Diagnostic budget (default 15000; max 600000)\r\n"
+        L"  --result-file <path>    New final-result receipt for eject --this\r\n"
         L"\r\n"
         L"Examples:\r\n"
         L"  usb-eject.exe eject E:\r\n"
@@ -116,7 +123,11 @@ int output_help(void) {
         L"coverage, but protected processes and kernel drivers may remain opaque.\r\n"
         L"Exit codes: 0 success, 1 usage, 2 not found, 3 ambiguous, 4 busy,\r\n"
         L"5 access denied, 6 unsupported, 7 internal, 8 no media,\r\n"
-        L"9 incomplete diagnostic, 10 blocker action failed.\r\n");
+        L"9 incomplete diagnostic/discovery, 10 blocker action failed,\r\n"
+        L"11 portable ejection started (pending; read the result receipt).\r\n"
+        L"\r\nUse help list, help diagnose, or help eject for command details.\r\n"
+        L"Values may use --option=value, including labels starting with '--'.\r\n"
+        L"--this returns before removal; exit 11 never means safe to unplug.\r\n");
 }
 
 int output_command_help(CommandKind command) {
@@ -124,28 +135,57 @@ int output_command_help(CommandKind command) {
         return output_write(0,
             L"Usage: usb-eject.exe list [--format text|tsv]\r\n"
             L"Lists mounted, capability-checked USB/IEEE 1394 removable volumes.\r\n"
-            L"Text includes device, bus, card-reader, media, and instance details.\r\n");
+            L"Text includes device, label, bus, card-reader, media, and instance details.\r\n"
+            L"--format tsv: one header and escaped fields for scripts; unknown fields are empty.\r\n"
+            L"Discovery warnings go to stderr; exit 9 means results may be incomplete.\r\n"
+            L"Example: usb-eject.exe list --format tsv\r\n"
+            L"Run usb-eject.exe help for all commands and exit codes.\r\n");
     }
     if (command == COMMAND_DIAGNOSE) {
         return output_write(0,
             L"Usage: usb-eject.exe diagnose <target-or-selector> [--format text|tsv]\r\n"
             L"Inspects open handles and processes without requesting removal.\r\n"
-            L"Selectors: --letter, --mount, --label, --name, or --this.\r\n"
-            L"Elevation improves coverage but does not guarantee a complete scan.\r\n");
+            L"Use a drive (E:), file path, --letter E, --mount <path>,\r\n"
+            L"--label <pattern>, --name <pattern>, or --this (the executable's device).\r\n"
+            L"Use exactly one selector. Name/label matches ignore case; '*' is allowed at either end.\r\n"
+            L"--format text|tsv: results on stdout; TSV fields escape backslashes and control characters.\r\n"
+            L"--verbose: include every resource, native path, and handle instead of a process summary.\r\n"
+            L"--scan-timeout <ms>: scan budget, 1..600000 (default 15000). Progress uses stderr in a console.\r\n"
+            L"Elevation improves coverage but does not guarantee a complete scan. Exit 9 means incomplete.\r\n"
+            L"Examples: usb-eject.exe diagnose E: --verbose\r\n"
+            L"          usb-eject.exe diagnose --label=\"Work Backup\" --format tsv\r\n"
+            L"Run usb-eject.exe help for all exit codes.\r\n");
     }
     if (command == COMMAND_EJECT) {
         return output_write(0,
             L"Usage: usb-eject.exe eject <target-or-selector> [options]\r\n"
-            L"Selectors: --letter, --mount, --label, --name, or --this.\r\n"
-            L"Options: --card, --quiet, --no-prompt, --format text|tsv,\r\n"
-            L"         --kill-blocker <pid> (repeatable), and --yes.\r\n"
-            L"Forced termination requires explicit PID authorization and confirmation.\r\n");
+            L"Use a drive (E:), file path, --letter E, --mount <path>,\r\n"
+            L"--label <pattern>, --name <pattern>, or --this (the executable's device).\r\n"
+            L"Use exactly one selector. Name/label matches ignore case; '*' is allowed at either end.\r\n"
+            L"Default: safely remove the physical parent and its listed volumes.\r\n"
+            L"--card: lock and flush volumes on the selected media, eject it, and keep the reader.\r\n"
+            L"         Multiple matching media require a specific --letter or --mount.\r\n"
+            L"--quiet: suppress success output, including successful retries; errors remain visible.\r\n"
+            L"--no-prompt: never ask to close blocker processes. Redirecting any standard stream also disables prompts.\r\n"
+            L"--kill-blocker <pid>: authorize one currently verified blocker; repeat for multiple PIDs.\r\n"
+            L"--yes: confirm only explicitly supplied PIDs, including forced termination if graceful close fails.\r\n"
+            L"Forced termination can lose unsaved data. Save work before authorizing it.\r\n"
+            L"--format text|tsv: failure diagnostics on stderr; TSV action messages use stdout.\r\n"
+            L"--verbose: include individual handles and native paths in text diagnostics.\r\n"
+            L"--scan-timeout <ms>: per-scan budget, 1..600000 (default 15000).\r\n"
+            L"--this: start from a temporary copy; exit 11 means pending, not removed.\r\n"
+            L"--result-file <path>: choose a new receipt outside the target for --this; existing files are never replaced.\r\n"
+            L"                     Read its final exit_code line for the outcome. A default receipt is generated otherwise.\r\n"
+            L"Examples: usb-eject.exe eject E: --no-prompt\r\n"
+            L"          usb-eject.exe eject --mount \"C:\\Mounts\\Camera\" --card\r\n"
+            L"          usb-eject.exe eject E: --kill-blocker 1234 --yes\r\n"
+            L"Run usb-eject.exe help for all exit codes.\r\n");
     }
     return output_help();
 }
 
 int output_version(void) {
-    return output_write(0, L"usb-eject 0.1.0\r\n");
+    return output_write(0, L"usb-eject 0.2.0\r\n");
 }
 
 static const wchar_t *safe(const wchar_t *value) {
@@ -231,7 +271,8 @@ int output_inventory(const DeviceInventory *inventory, OutputFormat format) {
 
     supported_count = 0;
     for (volume_index = 0; volume_index < inventory->count; volume_index++) {
-        if (inventory->volumes[volume_index].removal_devinst != 0) supported_count++;
+        if (inventory->volumes[volume_index].removal_devinst != 0 &&
+            inventory->volumes[volume_index].mount_count != 0) supported_count++;
     }
     if (supported_count == 0) return output_write(0, L"No supported removable volumes found.\r\n");
 
@@ -261,14 +302,15 @@ int output_ambiguous(const DeviceInventory *inventory, const ResolvedTarget *tar
     const VolumeInfo *volume;
     const wchar_t *mount;
     if (!output_printf(1,
-            L"Target is ambiguous: %u physical devices matched; nothing was ejected.\r\n",
-            (unsigned)target->distinct_match_count) ||
+            L"Target is ambiguous: %u %ls matched; nothing was ejected.\r\n",
+            (unsigned)target->distinct_match_count,
+            target->media_scope ? L"media targets" : L"physical devices") ||
         !output_write(1, L"Matches:\r\n")) return 0;
     for (index = 0; index < target->distinct_match_count; index++) {
         volume = &inventory->volumes[target->distinct_volume_indexes[index]];
         mount = volume->mount_count != 0 ? volume->mount_points[0] : volume->volume_guid;
-        if (!output_printf(1, L"  %ls  %ls %ls  [%ls]\r\n",
-                safe(mount), safe(volume->vendor), safe(volume->product),
+        if (!output_printf(1, L"  %ls  label=\"%ls\"  %ls %ls  [%ls]\r\n",
+                safe(mount), safe(volume->label), safe(volume->vendor), safe(volume->product),
                 safe(volume->instance_id))) return 0;
     }
     return output_write(1,
@@ -276,17 +318,61 @@ int output_ambiguous(const DeviceInventory *inventory, const ResolvedTarget *tar
 }
 
 int output_target(const DeviceInventory *inventory, const ResolvedTarget *target) {
+    Command command;
+    memset(&command, 0, sizeof(command));
+    command.kind = COMMAND_DIAGNOSE;
+    return output_target_operation(inventory, target, &command);
+}
+
+int output_target_operation(const DeviceInventory *inventory,
+    const ResolvedTarget *target, const Command *command) {
     const VolumeInfo *volume;
     const wchar_t *mount;
+    size_t index;
+    size_t mount_index;
 
     volume = &inventory->volumes[target->volume_index];
     mount = volume->mount_count != 0 ? volume->mount_points[0] : volume->volume_guid;
-    if (!output_printf(0, L"Target: %ls (%ls %ls)\r\n",
-            safe(mount), safe(volume->vendor), safe(volume->product))) return 0;
-    if (target->sibling_volume_count > 1 &&
-        !output_printf(0, L"The physical device contains %u mounted volumes; all will be removed.\r\n",
-            (unsigned)target->sibling_volume_count)) return 0;
+    if (!output_printf(0, L"Target: %ls  label=\"%ls\" (%ls %ls)\r\n",
+            safe(mount), safe(volume->label), safe(volume->vendor), safe(volume->product))) return 0;
+    if (!output_write(0, command->kind == COMMAND_DIAGNOSE ?
+        L"Read-only inspection. Related volumes:\r\n" : command->card_mode ?
+        L"Eject media and keep the reader. Affected volumes:\r\n" :
+        L"Remove the physical device. Affected volumes:\r\n")) return 0;
+    for (index = 0; index < inventory->count; index++) {
+        if (!target_volume_in_scope(inventory, target, index)) continue;
+        volume = &inventory->volumes[index];
+        if (volume->mount_count == 0 && !output_printf(0, L"  %ls  %ls (no mount point)\r\n",
+            safe(volume->volume_guid), safe(volume->label))) return 0;
+        for (mount_index = 0; mount_index < volume->mount_count; mount_index++) {
+            if (!output_printf(0, L"  %ls  %ls\r\n", volume->mount_points[mount_index],
+                safe(volume->label))) return 0;
+        }
+    }
     return 1;
+}
+
+static int output_ps_argument(int stream, const wchar_t *value) {
+    const wchar_t *cursor;
+    if (!output_write(stream, L" '")) return 0;
+    for (cursor = safe(value); *cursor; cursor++) {
+        if (*cursor == L'\'' && !output_write(stream, L"'")) return 0;
+        if (!output_printf(stream, L"%lc", *cursor)) return 0;
+    }
+    return output_write(stream, L"'");
+}
+
+int output_recovery_command(const Command *command, const VolumeInfo *volume, DWORD pid) {
+    int stream = command->format == OUTPUT_TSV ? 0 : 1;
+    if (!output_write(stream, L"After saving work, authorize this PID with the PowerShell command (may force termination):\r\n  & 'usb-eject.exe' eject --mount") ||
+        !output_ps_argument(stream, volume->mount_points[0])) return 0;
+    if (command->card_mode && !output_write(stream, L" --card")) return 0;
+    if (command->quiet && !output_write(stream, L" --quiet")) return 0;
+    if (command->no_prompt && !output_write(stream, L" --no-prompt")) return 0;
+    if (command->verbose && !output_write(stream, L" --verbose")) return 0;
+    return output_printf(stream, L" --format %ls --scan-timeout %lu --kill-blocker %lu --yes\r\n",
+        command->format == OUTPUT_TSV ? L"tsv" : L"text",
+        (unsigned long)command->scan_timeout_ms, (unsigned long)pid);
 }
 
 static void output_win32_message(DWORD code) {
@@ -319,6 +405,15 @@ int output_app_error(const AppError *error) {
 }
 
 int output_eject_error(const EjectResult *result) {
+    if (result->config_ret == CR_SUCCESS && result->win32_error != 0) {
+        output_write(1, result->status == APP_NO_MEDIA ? L"Media ejection failed: no media is present.\r\n" :
+            result->status == APP_UNSUPPORTED ? L"Media ejection is not supported by this device.\r\n" :
+            result->status == APP_BUSY ? L"Media is in use; close files and applications on the listed volumes.\r\n" :
+            result->status == APP_ACCESS_DENIED ? L"Media ejection was denied; check permissions or use an elevated terminal.\r\n" :
+            L"Media ejection failed during volume preparation or removal.\r\n");
+        output_win32_message(result->win32_error);
+        return 1;
+    }
     output_printf(1, L"Ejection failed: %ls (CONFIGRET %lu).\r\n",
         eject_veto_name(result->veto_type), (unsigned long)result->config_ret);
     if (result->veto_name[0] != L'\0') {
@@ -432,6 +527,37 @@ static int output_diagnostic_core(
         if (!output_write(error_stream, L"Diagnostic findings:\r\n")) return 0;
         for (index = 0; index < report->finding_count; index++) {
             finding = &report->findings[index];
+            if (!verbose_output) {
+                size_t prior;
+                size_t item;
+                size_t count = 0;
+                size_t shown = 0;
+                for (prior = 0; prior < index; prior++) {
+                    if (report->findings[prior].pid == finding->pid) break;
+                }
+                if (prior != index) continue;
+                for (item = index; item < report->finding_count; item++) {
+                    if (report->findings[item].pid == finding->pid) count++;
+                }
+                if (!output_printf(error_stream, L"  PID %lu  %ls  (%u resource findings)\r\n",
+                    (unsigned long)finding->pid, safe(finding->process_image), (unsigned)count)) return 0;
+                services = joined_services(finding);
+                if (services == NULL) return 0;
+                if (!output_printf(error_stream, L"    user: %ls%ls%ls\r\n", safe(finding->process_user),
+                    finding->service_count ? L"; services: " : L"", services)) { free(services); return 0; }
+                free(services);
+                for (item = index; item < report->finding_count && shown < 3; item++) {
+                    if (report->findings[item].pid != finding->pid) continue;
+                    if (!output_printf(error_stream, L"    %ls: %ls\r\n",
+                        diagnostic_classification_name(report->findings[item].classification),
+                        safe(report->findings[item].dos_path))) return 0;
+                    shown++;
+                }
+                if (count > shown && !output_printf(error_stream,
+                    L"    ... %u more; use --verbose for every resource and native handle.\r\n",
+                    (unsigned)(count - shown))) return 0;
+                continue;
+            }
             services = joined_services(finding);
             if (services == NULL) return 0;
             if (!output_printf(error_stream, L"  %ls  PID %lu  %ls\r\n",

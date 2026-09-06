@@ -3,6 +3,7 @@
 
 #include "app.h"
 #include "inventory.h"
+#include "target.h"
 #include "win32_compat.h"
 
 typedef struct {
@@ -16,6 +17,8 @@ typedef struct {
 AppStatus eject_status_from_veto(CONFIGRET result, PNP_VETO_TYPE veto_type);
 AppStatus eject_parent_device(DEVINST removal_devinst, EjectResult *result);
 AppStatus eject_card_media(const VolumeInfo *volume, EjectResult *result);
+AppStatus eject_card_target(const DeviceInventory *inventory,
+    const ResolvedTarget *target, EjectResult *result);
 const wchar_t *eject_veto_name(PNP_VETO_TYPE veto_type);
 
 #endif

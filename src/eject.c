@@ -11,6 +11,9 @@
 #ifndef ERROR_NOT_READY
 #define ERROR_NOT_READY 21
 #endif
+#ifndef FSCTL_LOCK_VOLUME
+#define FSCTL_LOCK_VOLUME 0x00090018
+#endif
 #ifndef ERROR_NO_MEDIA_IN_DRIVE
 #define ERROR_NO_MEDIA_IN_DRIVE 1112
 #endif
@@ -79,10 +82,11 @@ static AppStatus status_from_win32(DWORD error) {
     if (error == ERROR_ACCESS_DENIED) return APP_ACCESS_DENIED;
     if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION) return APP_BUSY;
     if (error == ERROR_NOT_READY || error == ERROR_NO_MEDIA_IN_DRIVE) return APP_NO_MEDIA;
+    if (error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_FUNCTION) return APP_UNSUPPORTED;
     return APP_INTERNAL_ERROR;
 }
 
-AppStatus eject_card_media(const VolumeInfo *volume, EjectResult *result) {
+static AppStatus lock_card_volume(const VolumeInfo *volume, HANDLE *locked, EjectResult *result) {
     wchar_t *path;
     HANDLE handle;
     DWORD returned;
@@ -111,28 +115,82 @@ AppStatus eject_card_media(const VolumeInfo *volume, EjectResult *result) {
     }
 
     returned = 0;
+    if (!DeviceIoControl(handle, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &returned, NULL)) {
+        error = GetLastError();
+        CloseHandle(handle);
+        result->win32_error = error;
+        /* Access denied after a successful read/write open commonly means open files. */
+        result->status = error == ERROR_ACCESS_DENIED ? APP_BUSY : status_from_win32(error);
+        return result->status;
+    }
+    if (!FlushFileBuffers(handle)) {
+        error = GetLastError();
+        CloseHandle(handle);
+        result->win32_error = error;
+        result->status = status_from_win32(error);
+        return result->status;
+    }
+
+    returned = 0;
     if (!DeviceIoControl(handle, IOCTL_STORAGE_CHECK_VERIFY2,
             NULL, 0, NULL, 0, &returned, NULL)) {
         error = GetLastError();
         CloseHandle(handle);
         result->win32_error = error;
         result->status = status_from_win32(error);
-        if (result->status == APP_INTERNAL_ERROR) result->status = APP_NO_MEDIA;
         return result->status;
+    }
+    *locked = handle;
+    return APP_OK;
+}
+
+AppStatus eject_card_target(const DeviceInventory *inventory,
+    const ResolvedTarget *target, EjectResult *result) {
+    HANDLE *handles;
+    size_t index;
+    DWORD returned;
+    AppStatus status = APP_OK;
+    eject_result_init(result);
+    if (inventory == NULL || target == NULL || inventory->volumes == NULL ||
+        target->volume_index >= inventory->count) {
+        result->status = APP_UNSUPPORTED;
+        return result->status;
+    }
+    handles = (HANDLE *)calloc(inventory->count, sizeof(HANDLE));
+    if (handles == NULL) {
+        result->status = APP_OUT_OF_MEMORY;
+        result->win32_error = ERROR_NOT_ENOUGH_MEMORY;
+        return result->status;
+    }
+    for (index = 0; index < inventory->count; index++) {
+        if (!target_volume_in_scope(inventory, target, index)) continue;
+        status = lock_card_volume(&inventory->volumes[index], &handles[index], result);
+        if (status != APP_OK) break;
     }
 
     returned = 0;
-    if (!DeviceIoControl(handle, IOCTL_STORAGE_EJECT_MEDIA,
+    if (status == APP_OK && !DeviceIoControl(handles[target->volume_index], IOCTL_STORAGE_EJECT_MEDIA,
             NULL, 0, NULL, 0, &returned, NULL)) {
-        error = GetLastError();
-        CloseHandle(handle);
-        result->win32_error = error;
-        result->status = status_from_win32(error);
-        return result->status;
+        result->win32_error = GetLastError();
+        status = status_from_win32(result->win32_error);
     }
-    CloseHandle(handle);
-    result->status = APP_OK;
-    return APP_OK;
+    for (index = 0; index < inventory->count; index++) {
+        if (handles[index] != NULL) CloseHandle(handles[index]);
+    }
+    free(handles);
+    result->status = status;
+    return status;
+}
+
+AppStatus eject_card_media(const VolumeInfo *volume, EjectResult *result) {
+    DeviceInventory inventory;
+    ResolvedTarget target;
+    memset(&inventory, 0, sizeof(inventory));
+    memset(&target, 0, sizeof(target));
+    inventory.volumes = (VolumeInfo *)volume;
+    inventory.count = 1;
+    target.media_scope = 1;
+    return eject_card_target(&inventory, &target, result);
 }
 
 const wchar_t *eject_veto_name(PNP_VETO_TYPE veto_type) {

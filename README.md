@@ -31,13 +31,62 @@ usb-eject.exe eject --this
 ```
 
 `--this` copies the executable to a uniquely named temporary directory, exits
-the original process, and continues the ejection from the temporary copy. The
-continuation cleans up its temporary files after it exits.
+the original process, and continues from that directory. Both the temporary
+directory and the result receipt must be outside the media/device being removed.
+The continuation cleans up its temporary executable after it exits.
+If the calling shell's working directory is on the USB drive, change to a local
+directory before invoking the executable by its full path; the shell itself can
+otherwise remain a blocker.
 
-Use `--card` to eject removable media without removing its reader. Use
+**Portable ejection returns exit code 11 (started), not 0 (removed).** Its receipt
+initially contains `state=pending`; completion appends `exit_code=<number>`.
+Only a final `exit_code=0` indicates success. A missing final line means the
+outcome is unknown, including if the continuation was interrupted. Receipts
+remain available after temporary executable cleanup and may be deleted after review.
+Use a new `--result-file` path for scripts; existing files are never overwritten:
+
+```powershell
+$receipt = Join-Path $env:TEMP ("usb-eject-" + [guid]::NewGuid() + ".result")
+usb-eject.exe eject --this --no-prompt --result-file $receipt
+if ($LASTEXITCODE -ne 11) { throw "Ejection did not start: exit $LASTEXITCODE" }
+$deadline = [DateTime]::UtcNow.AddMinutes(2)
+do {
+    $final = Get-Content -LiteralPath $receipt | Select-String '^exit_code=\d+$'
+    if ($final) { break }
+    Start-Sleep -Milliseconds 200
+} while ([DateTime]::UtcNow -lt $deadline)
+if (-not $final) { throw "No final result yet; inspect $receipt before unplugging" }
+$ejectExitCode = [int]($final.Line -replace '^exit_code=', '')
+if ($ejectExitCode -ne 0) { throw "Ejection failed: exit $ejectExitCode" }
+```
+
+Use `--card` to eject removable media without removing its reader. All volumes
+on the selected media are locked and flushed before removal; a failed lock or
+flush prevents ejection. On multi-slot readers, use a letter or mount path when
+a name matches multiple media. Card preparation can require elevation. Use
 `--no-prompt` to prohibit blocker-process prompts. Process termination is
 always PID-scoped; unattended termination requires both
 `--kill-blocker <pid>` and `--yes`.
+
+Interactive recovery asks separately about each eligible process, tries graceful
+close first, and separately confirms forced termination if necessary. Redirecting
+any standard stream disables these prompts. After authorized actions, one
+recovery retry is allowed when no known blockers or unresolved inspection errors
+remain. Limited diagnostic access alone does not prevent a Windows-vetoable
+parent removal request; card removal still requires exclusive volume locks.
+
+Use `eject --help`, `diagnose --help`, or append `--help` to an existing command.
+Values accept both `--option value` and `--option=value`; for example,
+`diagnose --label=--backup` selects a label that begins with `--`.
+
+Text diagnostics group resource findings by process. `--verbose` shows all
+individual handles and native paths. `--scan-timeout <milliseconds>` sets a
+per-scan traversal budget (default 15000, range 1 to 600000). The helper response
+header and payload share a maximum one-second deadline, shortened to the
+remaining scan budget. Progress goes to stderr in text console mode; no progress
+is added to TSV. Native Windows enumeration/metadata calls and helper cleanup
+can add time beyond the traversal budget. An interrupted scan reports incomplete
+coverage rather than claiming there are no blockers.
 
 `list --format tsv` and `diagnose <target> --format tsv` provide deterministic
 machine-readable output. Failed `eject --format tsv` diagnostics are written
@@ -45,8 +94,14 @@ to standard error without human-readable text mixed into the TSV stream.
 Backslash, tab, carriage return, and newline inside fields are escaped as
 `\\`, `\t`, `\r`, and `\n`.
 
+Discovery warnings go to stderr. `list` returns available rows with exit 9 when
+discovery is incomplete; `eject` refuses removal when the full scope cannot be
+verified. A clean empty list returns 0. `diagnose` also uses exit 9 for incomplete
+coverage. Errors before an ejection request (usage, discovery, target resolution)
+are explanatory text on stderr even when `--format tsv` was requested.
+
 Run `usb-eject.exe help` for all options and exit codes. Normal enumeration and
-ejection do not require elevation. An elevated terminal can improve diagnostic
+parent-device ejection do not require elevation. An elevated terminal can improve diagnostic
 coverage, although protected processes and kernel drivers may remain opaque.
 
 ## Build
@@ -63,7 +118,7 @@ The executable is written to `build\usb-eject.exe`.
 
 GitHub Actions builds and tests every push and pull request. Successful builds
 include a downloadable `usb-eject` artifact. Pushing a version tag
-such as `v0.1.0` also creates a GitHub release containing `usb-eject.exe` and
+such as `v0.2.0` also creates a GitHub release containing `usb-eject.exe` and
 its SHA-256 checksum file.
 
 ## Test
@@ -74,6 +129,13 @@ its SHA-256 checksum file.
 
 Unit tests do not eject hardware. The `list` command is read-only. Do not run
 an `eject` command against media containing data that has not been saved.
+
+Regression tests inject device I/O, process actions, discovery failures, console
+state, and child launch behavior. They cover multiple blockers, limited scans,
+quiet/redirected output, media ambiguity, locks/flush failures, portable receipts,
+deadline expiry, help, and quoted recovery commands. The diagnostic smoke test
+performs a read-only scan for a known open file. Real card-reader firmware and
+physical safe removal still require dedicated hardware validation.
 
 ## Current implementation status
 

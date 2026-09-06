@@ -14,6 +14,10 @@ int output_command_help(CommandKind command);
 int output_version(void);
 int output_inventory(const DeviceInventory *inventory, OutputFormat format);
 int output_target(const DeviceInventory *inventory, const ResolvedTarget *target);
+int output_target_operation(const DeviceInventory *inventory,
+    const ResolvedTarget *target, const Command *command);
+int output_recovery_command(const Command *command, const VolumeInfo *volume, DWORD pid);
+void output_set_verbose(int verbose);
 int output_ambiguous(const DeviceInventory *inventory, const ResolvedTarget *target);
 int output_app_error(const AppError *error);
 int output_eject_error(const EjectResult *result);

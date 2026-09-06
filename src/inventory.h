@@ -33,6 +33,8 @@ typedef struct {
     size_t count;
     size_t capacity;
     size_t skipped_transient;
+    DWORD last_error;
+    const wchar_t *last_operation;
 } DeviceInventory;
 
 void inventory_init(DeviceInventory *inventory);

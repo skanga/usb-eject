@@ -42,6 +42,9 @@ typedef struct {
     int quiet;
     int no_prompt;
     int assume_yes;
+    int verbose;
+    DWORD scan_timeout_ms;
+    wchar_t *result_file;
     DWORD *authorized_pids;
     size_t authorized_pid_count;
     size_t authorized_pid_capacity;

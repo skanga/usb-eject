@@ -331,7 +331,7 @@ RESOLVE_TARGET
     | unsupported/ambiguous -> REPORT_AND_EXIT
     v
 VALIDATE_DEVICE
-    | card mode ----------------> EJECT_CARD -> REPORT
+    | card mode ----------------> LOCK_ALL_MEDIA_VOLUMES -> FLUSH -> EJECT_CARD -> REPORT
     v
 REQUEST_PARENT_EJECT
     | success ------------------> REPORT_SUCCESS
@@ -444,30 +444,26 @@ All running process images are also compared with the target path set. This catc
 
 ### 11.6 Inspector helper protocol
 
-The same executable supports a hidden `--internal-inspect` mode. The parent creates:
+The executable's hidden `--internal-handle-worker` mode validates its inherited
+input/output pipe handles. The parent duplicates only an already-inspected File
+handle into the worker and sends that handle value. The worker resolves its
+native path, closes the duplicate, and sends a fixed-size response header with
+an error code and UTF-16 character count, followed by the optional path payload.
+The receiver rejects oversized or unterminated paths.
 
-- A pagefile-backed, read/write shared-memory job table.
-- An anonymous result/progress pipe whose write end is inherited by the helper.
-- A helper process in a kill-on-close Job Object.
+Header and payload share one deadline: at most 1000 ms, shortened to the
+remaining scan budget. The parent polls available pipe bytes before reading, so
+an incomplete payload cannot strand a reader thread. A timed-out or failed worker
+is closed/terminated and replaced for the next handle. Completed findings remain
+in the report. No handles in other processes are remotely closed.
 
-Each job contains PID, process creation time, remote handle value, granted access, and expected object-type index. The helper validates the mapping header, version, count, and total size before reading it.
-
-For each job the helper:
-
-1. Sends a `START` record.
-2. Reopens the process and verifies its creation time.
-3. Duplicates the remote handle with `DUPLICATE_SAME_ACCESS` and no close-source flag.
-4. Queries the object type and rejects an unexpected type.
-5. For File handles, calls `GetFinalPathNameByHandleW` with dynamically sized buffers and then queries the native object name if needed.
-6. For Section handles, queries the native object name.
-7. Sends a length-prefixed result record followed by `DONE`.
-8. Closes the duplicate and process handles.
-
-The wire format uses fixed-width integers, a magic value, a protocol version, explicit byte lengths, and UTF-16 payloads. The receiver rejects oversized, truncated, out-of-order, or duplicate records.
-
-The parent tracks the most recent `START`. If no progress arrives within the per-handle deadline, it closes/terminates its helper through the Job Object, marks that handle timed out, and starts a new helper at the following job. Completed results are retained. The first implementation uses a 750 ms deadline, configurable only at compile time until real-device testing establishes a better value.
-
-Internal mode does not elevate itself, accept target termination options, or write to the selected device.
+`--scan-timeout` sets a per-scan traversal budget (default 15000 ms). The scan
+checks the budget between handle/process jobs and before service attribution;
+exhaustion marks partial-timeout. Windows enumeration and metadata calls and
+worker cleanup can add time beyond this cooperative budget. Text console scans
+report progress on stderr approximately once per second. TSV and quiet mode
+disable progress. Process actions require a fresh scan without timeout or
+unresolved safety errors; enumeration-of-services failures also prevent action.
 
 ### 11.7 Snapshot consistency
 
@@ -569,10 +565,10 @@ After an action completes:
 
 1. Rebuild enough inventory to prove that the same physical target is still present.
 2. Run a complete blocker diagnostic scan.
-3. If blocking candidates, unresolved safety issues, or identity changes remain, report them and do not retry automatically.
-4. Otherwise invoke `CM_Request_Device_EjectW` once.
+3. If known blocking candidates or unresolved inspection errors remain, report them and do not retry automatically. Access, timeout, or changed-handle coverage limitations alone do not veto the normal Windows safe-removal retry.
+4. Otherwise invoke the normal parent-removal path once (including its bounded pending-close handling), or reacquire exclusive media locks before card removal.
 
-No chain of additional automatic close/kill/retry operations is allowed.
+Each distinct eligible blocker receives a separate fresh validation and confirmation. The initial interactive pass does not stop after the first successful action. There is only one recovery retry after that pass.
 
 ## 13. Elevation behavior
 
@@ -584,16 +580,28 @@ The inspector helper inherits the already-running parent's token. Consequently, 
 
 ## 14. Portable `--this` flow
 
-The original process creates a random temporary subdirectory using system-generated random bytes encoded as hex, copies its executable, and launches the copy with:
+The original resolves the target, checks that the temporary root is outside its
+removal scope, creates a random temporary subdirectory, and copies its executable.
+It creates a new persistent result receipt outside the target, either at the
+user's `--result-file` path or at a unique path under the temporary root. Creation
+uses CREATE_NEW; an existing file is never overwritten. The initial ASCII receipt
+contains `usb-eject-result-v1` and `state=pending` lines.
 
-- An internal continuation marker and protocol version.
-- The original volume GUID and device instance ID.
-- The original process ID and creation time.
-- A randomly generated one-time nonce.
+The child command carries the original PID, volume GUID, device instance ID,
+resolved mount, receipt path, and execution options. Its working directory is
+explicitly the temporary directory. The parent returns APP_STARTED (11), which
+does not claim removal succeeded. It reports the receipt path even under quiet.
 
-The continuation waits for the exact original process identity to exit, rebuilds inventory, and verifies that both stable device identifiers still select one device before ejecting it.
+The continuation validates that it is running from an expected temporary-copy
+path, parses the receipt/options, waits for the original PID to exit, rebuilds
+inventory, and verifies the volume GUID and device instance before removal.
+The final exit code is appended to the receipt and flushed; launch failures
+after receipt creation also append their outcome. Missing completion remains
+unknown/pending. Only `exit_code=0` establishes a successful removal result.
 
-Cleanup uses a small command script or a second best-effort cleanup invocation because a running executable cannot delete itself reliably. All cleanup paths are resolved and checked to remain under the captured temporary root before deletion. Failure to clean temporary files does not change a successful eject result but is reported.
+Cleanup uses the existing best-effort command script to remove the temporary
+executable and its directory. The receipt remains outside that directory for
+the caller to read and delete when no longer needed.
 
 ## 15. Output design
 
@@ -604,7 +612,16 @@ Cleanup uses a small command script or a second best-effort cleanup invocation b
 - Human diagnostics from a failed `eject` go to standard error.
 - Standalone `diagnose` findings go to standard output; invocation or scan errors go to standard error.
 
-The program does not change the caller's console code page.
+The program does not change the caller's console code page. Prompts require
+all three standard streams to be consoles. Target summaries name the label and
+every affected mount or unmounted-volume GUID; diagnosis is explicitly read-only
+and card mode explicitly retains the reader. Default diagnostics group by PID
+with counts and three example resources. `--verbose` retains per-handle details.
+Quiet suppresses both first-attempt and retry success output. Recovery commands
+use PowerShell single-quoted arguments (embedded quotes doubled) and preserve
+the resolved mount, card mode, output options, scan budget, and explicit PID.
+Discovery failures produce stderr warnings and exit 9 with available list data;
+ejection refuses an incompletely established removal scope.
 
 ### 15.2 TSV escaping
 

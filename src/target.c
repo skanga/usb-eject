@@ -200,15 +200,29 @@ static int same_device(const VolumeInfo *left, const VolumeInfo *right) {
     return left == right;
 }
 
+int target_same_media(const VolumeInfo *left, const VolumeInfo *right) {
+    return left->disk_devinst != 0 && left->disk_devinst == right->disk_devinst &&
+        left->device_type == right->device_type && left->device_number == right->device_number;
+}
+
+int target_volume_in_scope(const DeviceInventory *inventory,
+    const ResolvedTarget *target, size_t index) {
+    const VolumeInfo *selected = &inventory->volumes[target->volume_index];
+    if (index == target->volume_index) return 1;
+    return target->media_scope ? target_same_media(selected, &inventory->volumes[index]) :
+        same_device(selected, &inventory->volumes[index]);
+}
+
 void resolved_target_dispose(ResolvedTarget *resolved) {
     if (resolved == NULL) return;
     free(resolved->distinct_volume_indexes);
     memset(resolved, 0, sizeof(*resolved));
 }
 
-AppStatus target_resolve(
+AppStatus target_resolve_mode(
     const DeviceInventory *inventory,
     const TargetSelector *selector,
+    int media_scope,
     ResolvedTarget *resolved,
     AppError *error)
 {
@@ -224,6 +238,7 @@ AppStatus target_resolve(
     size_t *distinct_indexes;
 
     memset(resolved, 0, sizeof(*resolved));
+    resolved->media_scope = media_scope;
     app_error_clear(error);
     if (inventory == NULL || selector == NULL) return APP_INTERNAL_ERROR;
     matched = (unsigned char *)calloc(inventory->count == 0 ? 1 : inventory->count, 1);
@@ -278,9 +293,9 @@ AppStatus target_resolve(
             match = match_letter(&inventory->volumes[index], letter);
         } else if (resolved_mount != NULL) {
             match = match_mount(&inventory->volumes[index], resolved_mount);
-        } else if (selector->kind == SELECTOR_LABEL) {
+        } else if (selector->kind == SELECTOR_LABEL && inventory->volumes[index].mount_count != 0) {
             match = text_match_pattern(inventory->volumes[index].label, selector->value);
-        } else if (selector->kind == SELECTOR_NAME) {
+        } else if (selector->kind == SELECTOR_NAME && inventory->volumes[index].mount_count != 0) {
             match = match_name(&inventory->volumes[index], selector->value);
         }
         if (match) matched[index] = 1;
@@ -304,8 +319,9 @@ AppStatus target_resolve(
     for (index = 0; index < inventory->count; index++) {
         if (!matched[index]) continue;
         for (previous = 0; previous < index; previous++) {
-            if (matched[previous] && same_device(
-                    &inventory->volumes[previous], &inventory->volumes[index])) break;
+            if (matched[previous] && (media_scope ? target_same_media(
+                    &inventory->volumes[previous], &inventory->volumes[index]) : same_device(
+                    &inventory->volumes[previous], &inventory->volumes[index]))) break;
         }
         if (previous == index) {
             if (resolved->distinct_match_count == 0) resolved->volume_index = index;
@@ -320,11 +336,15 @@ AppStatus target_resolve(
     if (resolved->distinct_match_count > 1) return APP_AMBIGUOUS;
     resolved->removal_devinst = inventory->volumes[resolved->volume_index].removal_devinst;
     for (index = 0; index < inventory->count; index++) {
-        if (same_device(&inventory->volumes[resolved->volume_index],
-                        &inventory->volumes[index])) {
+        if (target_volume_in_scope(inventory, resolved, index)) {
             resolved->sibling_volume_count++;
         }
     }
     status = resolved->removal_devinst == 0 ? APP_UNSUPPORTED : APP_OK;
     return status;
+}
+
+AppStatus target_resolve(const DeviceInventory *inventory,
+    const TargetSelector *selector, ResolvedTarget *resolved, AppError *error) {
+    return target_resolve_mode(inventory, selector, 0, resolved, error);
 }

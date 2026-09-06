@@ -199,6 +199,36 @@ static void test_cli_rejects_unsafe_or_ambiguous_input(void) {
     command_dispose(&command);
 }
 
+static void test_cli_help_and_missing_values(void) {
+    Command command;
+    ParseError error;
+    wchar_t *help[] = { L"usb-eject.exe", L"eject", L"E:", L"--help" };
+    wchar_t *missing[] = { L"usb-eject.exe", L"diagnose", L"--label", L"--no-prompt" };
+    wchar_t *literal[] = { L"usb-eject.exe", L"diagnose", L"--label=--help" };
+    wchar_t *format[] = { L"usb-eject.exe", L"list", L"--format=tsv" };
+    wchar_t *timeout[] = { L"usb-eject.exe", L"list", L"--scan-timeout=15000" };
+    command_init(&command);
+    CHECK(cli_parse(4, help, &command, &error));
+    CHECK(command.kind == COMMAND_HELP && command.help_topic == COMMAND_EJECT);
+    command_dispose(&command);
+    command_init(&command);
+    CHECK(!cli_parse(4, missing, &command, &error));
+    CHECK(error.argument_index == 2);
+    command_dispose(&command);
+    command_init(&command);
+    CHECK(cli_parse(3, literal, &command, &error));
+    CHECK(command.selector.value != NULL && wcscmp(command.selector.value, L"--help") == 0);
+    command_dispose(&command);
+    command_init(&command);
+    CHECK(cli_parse(3, format, &command, &error));
+    CHECK(command.format == OUTPUT_TSV);
+    command_dispose(&command);
+    command_init(&command);
+    CHECK(!cli_parse(3, timeout, &command, &error));
+    CHECK(error.argument_index == 2);
+    command_dispose(&command);
+}
+
 static void test_target_resolution_collapses_sibling_volumes(void) {
     DeviceInventory inventory;
     VolumeInfo volumes[3];
@@ -423,6 +453,7 @@ static void test_kill_authorization_is_explicit_and_pid_scoped(void) {
 }
 
 int main(void) {
+    test_cli_help_and_missing_values();
     test_case_insensitive_matching();
     test_supported_patterns();
     test_path_boundaries();

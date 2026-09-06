@@ -82,6 +82,18 @@ usb-eject.exe eject --this
 
 `/?`, `-h`, and `--help` shall be aliases for `help`.
 
+Help flags may appear anywhere after a recognized command and return help before
+inventory or actions. `help list`, `help diagnose`, and `help eject` provide
+command-specific selector syntax, option descriptions, and examples. Valued
+options accept `--option=value`, including literal values beginning with `--`.
+Missing values and unknown options identify the offending token and corrective syntax.
+
+`diagnose` and `eject` accept `--verbose` for per-handle text details and
+`--scan-timeout <ms>` for a traversal budget of 1..600000 ms (default 15000).
+Console progress goes to stderr and is disabled for TSV. Header and payload
+reads share the remaining per-handle/scan deadline. Windows metadata/enumeration
+calls and cleanup are not promised a hard wall-clock deadline.
+
 `diagnose` accepts the same target selectors as `eject`, but performs no removal request and makes no changes. It reports open resources that could prevent removal.
 
 `--kill-blocker <pid>` may be repeated to authorize termination of specific blocker processes before one automatic ejection retry. It is valid only with `eject`; it is never implied by `--quiet` or any other option.
@@ -110,6 +122,14 @@ Label and device-name comparisons shall be case-insensitive.
 
 The optional `--card` flag changes the operation from ejecting the parent device to issuing `IOCTL_STORAGE_EJECT_MEDIA` for the selected volume.
 
+Card selection collapses partitions of the same disk/media, not separate media
+that share a removable parent. Multiple matching media are ambiguous. Every
+discovered volume on that media, including volumes without mount points, must
+be locked with `FSCTL_LOCK_VOLUME` and flushed before the eject IOCTL. Any failed
+lock, flush, or verification aborts removal and releases all acquired handles.
+Unsupported media operations return 6; actual no-media errors return 8; other
+I/O failures retain their own classification.
+
 ```text
 usb-eject.exe eject E: --card
 ```
@@ -137,6 +157,10 @@ mount_point	label	vendor	product	revision	bus_type	card_reader	media_present	dev
 Missing values shall be empty. Boolean values shall be `true`, `false`, or empty when unknown. Records shall be ordered case-insensitively by mount point.
 
 JSON output is deferred until after the MVP.
+
+Discovery errors must not be reported as a clean empty result. `list` emits the
+available rows and returns 9 with explanatory stderr warnings if discovery was
+incomplete. `eject` must refuse removal until full device scope is established.
 
 ## 6. Ejection behavior
 
@@ -168,6 +192,16 @@ Because an executing image can prevent removal, the implementation shall support
 4. Allow a short bounded interval for the original image to close.
 5. Request ejection from the temporary copy.
 6. Arrange best-effort cleanup of the temporary executable and directory.
+
+The child working directory is the new temporary directory. Temporary storage
+and result receipts must resolve outside every volume in the removal scope.
+The original returns 11 for a successful handoff, never 0. A new result receipt
+is created before launching the child, with `state=pending`; final completion
+appends `exit_code=N`. `--result-file <path>` chooses a new receipt for `--this`,
+otherwise a unique receipt is generated under the temporary root. Existing files
+are not overwritten. The receipt survives executable cleanup. Missing final
+status means unknown/pending, not success. Launch failures after receipt creation
+record their failure code in the receipt.
 
 The internal continuation argument shall be documented in source but omitted from normal help output. It shall validate the supplied volume identity and reject malformed input.
 
@@ -277,6 +311,7 @@ Diagnostic text belongs on standard error during `eject` so normal standard outp
 After reporting one or more live `blocking-candidate` or `process-on-device` findings, the tool shall offer a termination path:
 
 - In an interactive console, it shall ask whether the user wants to terminate an eligible blocker and retry. The default answer is No.
+- Each distinct eligible blocker is considered with fresh validation and its own confirmation; handling one does not stop the remaining offers.
 - When input or output is redirected, it shall not prompt. It shall print the explicit `--kill-blocker <pid>` command needed to authorize a subsequent attempt.
 - A command may use `--no-prompt` to disable interactive offers.
 - Automated termination requires both `--kill-blocker <pid>` and `--yes`. Without `--yes`, each eligible PID shall still require interactive confirmation.
@@ -298,6 +333,12 @@ After an authorized close, service stop, or termination:
 3. Print any blockers that remain.
 4. Retry safe ejection exactly once if no unresolved safety condition was introduced.
 
+Known remaining blockers and unresolved inspection errors prevent retry. Access,
+timeout, or changing-handle limitations alone do not prevent the normal
+Windows-vetoable parent removal retry; media removal must still acquire exclusive
+locks. Recovery hints provide a complete quoted PowerShell command with the
+resolved target, card mode, output preferences, scan budget, and explicit PID.
+
 The tool shall never call a remote-close-handle operation. Termination acts on the owning process as a whole and may cause unsaved data loss.
 
 ## 9. Output and exit codes
@@ -317,19 +358,26 @@ The executable shall use these exit codes:
 | 6 | Unsupported target or operation |
 | 7 | Windows API or internal error |
 | 8 | Card reader contains no media |
-| 9 | Diagnostic scan completed but was incomplete |
+| 9 | Diagnostic scan or device discovery was incomplete |
 | 10 | Requested blocker process could not be safely stopped or terminated |
+| 11 | Portable ejection started; read the receipt for the final outcome |
 
 Every failure shall include a short explanation. Busy and vetoed removals shall additionally include the blocker diagnostic report from section 8.
 
 Successful `eject` output shall identify the selected mount point and device. Scripts may suppress success output with `--quiet`; errors shall not be suppressed.
+
+Target output includes the label and affected mounts (or GUIDs for unmounted
+volumes). Diagnosis explicitly says it is read-only; card mode says the reader
+is retained. Quiet applies to both initial success and retry success. Default
+text diagnostics group findings by PID with counts and up to three resources;
+`--verbose` shows all native paths and handles. TSV remains one row per finding.
 
 ## 10. Safety requirements
 
 - No device shall be ejected when selection is ambiguous.
 - The program shall never terminate another process without explicit PID-scoped authorization and confirmation as defined in section 8.7.
 - The program shall never close, modify, or duplicate a handle with greater access than needed for inspection.
-- The program shall never write to a selected volume as part of ejection.
+- The program shall not create or modify files on the selected volume; safe media preparation may flush already-cached filesystem data.
 - An unsupported or insufficiently identified device shall be rejected rather than guessed.
 - All Windows handles and device-information sets shall be released on every exit path.
 - Buffer lengths returned by Windows shall be validated before use.
