@@ -118,7 +118,7 @@ The executable is written to `build\usb-eject.exe`.
 
 GitHub Actions builds and tests every push and pull request. Successful builds
 include a downloadable `usb-eject` artifact. Pushing a version tag
-such as `v0.2.0` also creates a GitHub release containing `usb-eject.exe` and
+such as `v0.2.1` also creates a GitHub release containing `usb-eject.exe` and
 its SHA-256 checksum file.
 
 ## Test

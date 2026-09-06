@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Fix portable test setup on clean checkouts so release CI can complete.
+- Includes all CLI and safe-removal improvements listed under 0.2.0; that
+  tag's CI failed before publishing release binaries.
+
 ## 0.2.0
 
 ### Changed CLI behavior

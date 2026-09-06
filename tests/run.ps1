@@ -113,7 +113,7 @@ function Invoke-CliSmoke([string]$Arguments, [string]$Executable = $cliExe) {
 }
 
 $version = Invoke-CliSmoke '--version'
-if ($version.ExitCode -ne 0 -or $version.Stdout -notmatch '^usb-eject 0\.2\.0' -or $version.Stderr) {
+if ($version.ExitCode -ne 0 -or $version.Stdout -notmatch '^usb-eject 0\.2\.1' -or $version.Stderr) {
     throw "--version CLI contract failed"
 }
 $help = Invoke-CliSmoke 'help'
