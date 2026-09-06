@@ -2,8 +2,7 @@
 
 This repository contains a native command-line implementation inspired by
 [USB Disk Ejector](https://github.com/bgbennyboy/USB-Disk-Ejector). It targets
-64-bit Windows 10 and Windows 11 and builds with the `petcc64` compiler in the
-adjacent `mincc` directory.
+64-bit Windows 10 and Windows 11 and builds with the `mincc` compiler.
 
 ## Install
 
