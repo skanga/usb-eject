@@ -48,6 +48,8 @@ int main(void) {
     char text[256];
     DWORD read;
     GetFullPathNameW(L"build", 32768, root, NULL);
+    CHECK(CreateDirectoryW(root, NULL) || GetLastError() == ERROR_ALREADY_EXISTS);
+    if (failures) return 1;
     _snwprintf(test_temp, 32768, L"%ls\\portable-test-%lu-%lu\\", root,
         (unsigned long)GetCurrentProcessId(), (unsigned long)GetTickCount());
     CHECK(CreateDirectoryW(test_temp, NULL));
